@@ -9,7 +9,7 @@
 本项目是从 Smart Query 项目中独立出来的主题模板推荐系统，专注于帮助用户在"魔数师"数据分析平台中快速定位合适的主题和模板。
 
 **核心功能**：
-- **需求澄清**：将用户问题映射到标准术语
+- **需求澄清**：将用户问题通过向量化语义搜索直接映射到魔数师指标
 - **主题推荐**：推荐合适的业务主题
 - **指标推荐**：推荐主题下可勾选的核心指标
 - **模板推荐**：推荐可直接使用的透视分析/万能查询模板
@@ -20,23 +20,26 @@
 
 | Skill | 说明 |
 |-------|------|
-| `theme-template-recommendation` | 主 Skill：四阶段执行流程 |
-| `requirement-clarification` | 阶段 0：需求澄清（前置依赖） |
+| `theme-template-recommendation` | 主 Skill：四阶段执行流程（含需求澄清） |
 
 ---
 
 ## MCP 工具
 
-### theme-ontology（Neo4j - 8 个工具）
+### theme-vector（Chroma + SiliconFlow - 1 个工具）
 
 | 工具 | 功能 | 阶段 |
 |------|------|------|
-| `search_terms_by_keyword` | 搜索业务术语 | 0 |
-| `get_tables_by_term` | 术语→关联表 | 0 |
+| `search_indicators_by_vector` | **向量化语义搜索魔数师指标** | 0 |
+
+### theme-ontology（Neo4j - 7 个工具）
+
+| 工具 | 功能 | 阶段 |
+|------|------|------|
+| `batch_get_indicators_themes` | 批量提取 THEME | 0, 2 |
 | `get_indicator_full_path` | 指标完整路径（含 THEME） | 1 |
 | `get_indicator_field_mapping` | 指标字段映射 | 1 |
 | `get_table_terms` | 表字段术语描述 | 1 |
-| `batch_get_indicators_themes` | 批量提取 THEME | 2 |
 | `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 3 |
 | `get_template_indicators` | 模板包含的指标 | 3 |
 
@@ -58,11 +61,13 @@
     ▼
 ┌─────────────────────────────────────────┐
 │  阶段 0：需求澄清                         │
-│  - 关键词提取与术语搜索                    │
-│  - 匹配度计算与用户联动                    │
-│  - 需求支撑评估                           │
+│  - 关键词提取                             │
+│  - 向量化语义搜索（直接搜索指标）           │
+│  - 用户确认映射结果                       │
+│  - 问题改写                               │
 │  → 输出：normalized_question              │
-│  → 输出：related_indicator_ids            │
+│  → 输出：confirmed_indicators           │
+│  → 输出：filter_indicators              │
 └─────────────────────────────────────────┘
     │
     ▼
@@ -102,12 +107,15 @@
 
 ## 数据库依赖
 
-本项目依赖两个数据源：
+本项目依赖三个数据源：
 
-1. **Neo4j**：存储魔数师指标层（THEME、TEMPLATE、INDICATOR、TERM）
-2. **MySQL**：存储指标-字段映射关系
+1. **Chroma**：存储魔数师指标的向量化数据（用于语义搜索）
+2. **Neo4j**：存储魔数师指标层（THEME、TEMPLATE、INDICATOR、TERM）
+3. **MySQL**：存储指标-字段映射关系
 
 配置文件位于 `mcp-server/.env`。
+
+**前置准备**：首次使用需要运行 `python scripts/indicator_vectorizer.py --rebuild` 对指标进行向量化。
 
 ---
 
@@ -117,14 +125,16 @@
 theme-template-recommendation/
 ├── .claude/
 │   └── skills/
-│       ├── theme-template-recommendation/
-│       │   └── SKILL.md
-│       └── requirement-clarification/
+│       └── theme-template-recommendation/
 │           └── SKILL.md
 ├── mcp-server/
 │   ├── venv/
 │   ├── theme_ontology_server.py
 │   ├── theme_resources_server.py
+│   ├── theme_vector_server.py        # 向量搜索 MCP 服务器
+│   ├── data/indicators_vector/       # Chroma 向量库存储目录
+│   ├── scripts/
+│   │   └── indicator_vectorizer.py   # 指标向量化脚本
 │   ├── requirements.txt
 │   └── .env
 ├── .mcp.json
