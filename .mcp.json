@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "theme-ontology": {
+      "command": "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/venv/bin/python",
+      "args": [
+        "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/theme_ontology_server.py"
+      ]
+    },
+    "theme-resources": {
+      "command": "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/venv/bin/python",
+      "args": [
+        "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/theme_resources_server.py"
+      ]
+    }
+  }
+}
