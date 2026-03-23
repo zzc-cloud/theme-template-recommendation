@@ -2,11 +2,12 @@
 """
 Theme Template Recommendation - 精简版 Neo4j MCP 服务器
 
-仅包含 8 个必要工具，用于主题模板推荐：
+包含 10 个工具，用于主题模板推荐：
 - 阶段 0：search_terms_by_keyword, get_tables_by_term
 - 阶段 1：get_indicator_full_path, get_indicator_field_mapping, get_table_terms
-- 阶段 2：batch_get_indicators_themes
+- 阶段 2：aggregate_themes_from_indicators
 - 阶段 3：get_theme_templates_with_coverage, get_template_indicators
+- 指标补全：get_theme_filter_indicators, get_theme_analysis_indicators
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -403,67 +404,6 @@ def get_table_terms(schema_name: str, table_name: str) -> str:
 
 # ==================== 阶段 2：主题聚合 ====================
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def batch_get_indicators_themes(indicator_ids: list) -> str:
-    """批量提取指标的 THEME 信息
-
-    用于主题模板推荐 Skill 的阶段 2，从匹配的指标列表中聚合 THEME 信息。
-
-    Args:
-        indicator_ids: 指标 ID 列表（最多 100 个）
-
-    Returns:
-        按 THEME 聚合的指标统计信息
-    """
-    start = time.time()
-    try:
-        # 限制最多 100 个指标
-        indicator_ids = indicator_ids[:100] if indicator_ids else []
-
-        if not indicator_ids:
-            return json.dumps({
-                "success": True,
-                "themes": {},
-                "count": 0,
-                "execution_time_ms": round((time.time() - start) * 1000, 2)
-            }, ensure_ascii=False, indent=2)
-
-        with get_driver().session() as session:
-            # 从指标的 path 中提取 THEME 信息
-            # 指标的 path_nodes 包含完整路径，我们需要找到 THEME 类型的节点
-            cypher = """
-            MATCH (i:INDICATOR) WHERE i.id IN $indicator_ids
-            MATCH (i)-[:HAS_CHILD*0..5]-(theme:THEME)
-            WITH theme, collect(DISTINCT i.id) as indicators, count(DISTINCT i) as cnt
-            RETURN theme.id as theme_id, theme.alias as theme_alias,
-                   theme.level as theme_level, theme.path as theme_path,
-                   indicators, cnt as indicator_count
-            ORDER BY cnt DESC
-            """
-            result = session.run(cypher, indicator_ids=indicator_ids)
-
-            themes = {}
-            for row in result:
-                theme_id = row["theme_id"]
-                themes[theme_id] = {
-                    "theme_alias": row["theme_alias"],
-                    "theme_level": row["theme_level"],
-                    "theme_path": row["theme_path"],
-                    "indicator_count": row["indicator_count"],
-                    "indicators": row["indicators"]
-                }
-
-        return json.dumps({
-            "success": True,
-            "themes": themes,
-            "theme_count": len(themes),
-            "total_indicators": len(indicator_ids),
-            "execution_time_ms": round((time.time() - start) * 1000, 2)
-        }, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
-
-
 # ==================== 阶段 3：模板推荐 ====================
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -626,6 +566,330 @@ def get_template_indicators(template_id: str) -> str:
             "indicators": indicators,
             "indicator_count": len(indicators),
             "execution_time_ms": round((time.time() - start) * 1000, 2),
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ==================== 主题指标补全工具 ====================
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_theme_filter_indicators(theme_id: str) -> str:
+    """获取主题下全量的筛选指标
+
+    筛选指标包括时间筛选指标和机构筛选指标，通过指标别名模糊匹配识别。
+    用于 1.2.1 全量指标补全场景。
+
+    Args:
+        theme_id: THEME 节点 ID
+
+    Returns:
+        {
+            "success": true,
+            "theme_id": "...",
+            "time_filter_indicators": [...],
+            "org_filter_indicators": [...],
+            "total_count": 10,
+            "execution_time_ms": 45.2
+        }
+
+    筛选指标识别规则：
+    - 时间筛选指标：别名包含 "数据日期" 或 "ETL数据日期"
+    - 机构筛选指标：别名匹配模式 "%级机构名称/%级机构编号/%管理机构名称/%管理机构编号/%账务机构名称/%账务机构编号"
+    """
+    start = time.time()
+    try:
+        with get_driver().session() as session:
+            # 获取主题下全量 INDICATOR（通过 HAS_CHILD 关系，支持直接和间接连接）
+            # THEME --HAS_CHILD--> INDICATOR（直接）
+            # THEME --HAS_CHILD--> SUBPATH --HAS_CHILD--> INDICATOR（间接）
+            cypher = """
+            MATCH (theme:THEME {id: $theme_id})
+            MATCH (theme)-[:HAS_CHILD*1..2]->(i:INDICATOR)
+            RETURN i.id as id, i.alias as alias,
+                   i.path as path, i.description as description
+            """
+            result = session.run(cypher, theme_id=theme_id)
+            indicators = [dict(r) for r in result]
+
+            if not indicators:
+                return json.dumps({
+                    "success": True,
+                    "theme_id": theme_id,
+                    "time_filter_indicators": [],
+                    "org_filter_indicators": [],
+                    "total_count": 0,
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False, indent=2)
+
+            # 时间筛选指标：别名包含 "数据日期" 或 "ETL数据日期"
+            time_patterns = ["数据日期", "ETL数据日期"]
+
+            # 机构筛选指标：别名匹配以下任一模式
+            org_patterns = [
+                "机构名称", "机构编号",
+                "管理机构名称", "管理机构编号",
+                "账务机构名称", "账务机构编号"
+            ]
+
+            time_filter = []
+            org_filter = []
+
+            for ind in indicators:
+                alias = ind.get("alias", "") or ""
+
+                # 时间筛选匹配
+                is_time = any(p in alias for p in time_patterns)
+                if is_time:
+                    time_filter.append({
+                        "id": ind["id"],
+                        "alias": alias,
+                        "description": ind.get("description") or ""
+                    })
+
+                # 机构筛选匹配
+                is_org = any(p in alias for p in org_patterns)
+                if is_org:
+                    org_filter.append({
+                        "id": ind["id"],
+                        "alias": alias,
+                        "description": ind.get("description") or ""
+                    })
+
+        return json.dumps({
+            "success": True,
+            "theme_id": theme_id,
+            "time_filter_indicators": time_filter,
+            "org_filter_indicators": org_filter,
+            "time_filter_count": len(time_filter),
+            "org_filter_count": len(org_filter),
+            "total_count": len(indicators),
+            "execution_time_ms": round((time.time() - start) * 1000, 2)
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
+    """获取主题下全量的分析指标
+
+    分析指标指除筛选指标之外的所有业务分析指标，用于数据分析场景。
+    用于 1.2.1 全量指标补全场景。
+
+    Args:
+        theme_id: THEME 节点 ID
+        top_k: 返回结果数量上限，默认200（最大500）
+
+    Returns:
+        {
+            "success": true,
+            "theme_id": "...",
+            "analysis_indicators": [
+                {
+                    "id": "INDICATOR.xxx",
+                    "alias": "贷款余额",
+                    "description": "..."
+                }
+            ],
+            "total_count": 150,
+            "execution_time_ms": 45.2
+        }
+
+    说明：
+    - 分析指标 = 主题全量指标 - 筛选指标（时间 + 机构）
+    - 返回结果按指标别名排序，便于浏览
+    """
+    start = time.time()
+    try:
+        top_k = min(max(1, top_k), 500)
+
+        with get_driver().session() as session:
+            # 获取主题下全量 INDICATOR（通过 HAS_CHILD 关系，支持直接和间接连接）
+            cypher = """
+            MATCH (theme:THEME {id: $theme_id})
+            MATCH (theme)-[:HAS_CHILD*1..2]->(i:INDICATOR)
+            RETURN i.id as id, i.alias as alias,
+                   i.path as path, i.description as description
+            ORDER BY i.alias
+            LIMIT $top_k
+            """
+            result = session.run(cypher, theme_id=theme_id, top_k=top_k)
+            indicators = [dict(r) for r in result]
+
+            if not indicators:
+                return json.dumps({
+                    "success": True,
+                    "theme_id": theme_id,
+                    "analysis_indicators": [],
+                    "total_count": 0,
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False, indent=2)
+
+            # 筛选指标识别规则（与分析指标互斥）
+            time_patterns = ["数据日期", "ETL数据日期"]
+            org_patterns = [
+                "机构名称", "机构编号",
+                "管理机构名称", "管理机构编号",
+                "账务机构名称", "账务机构编号"
+            ]
+
+            analysis_indicators = []
+            for ind in indicators:
+                alias = ind.get("alias", "") or ""
+
+                # 排除筛选指标：只要不匹配任一筛选模式，即为分析指标
+                is_time_filter = any(p in alias for p in time_patterns)
+                is_org_filter = any(p in alias for p in org_patterns)
+
+                if not (is_time_filter or is_org_filter):
+                    analysis_indicators.append({
+                        "id": ind["id"],
+                        "alias": alias,
+                        "description": ind.get("description") or ""
+                    })
+
+        return json.dumps({
+            "success": True,
+            "theme_id": theme_id,
+            "analysis_indicators": analysis_indicators,
+            "analysis_indicator_count": len(analysis_indicators),
+            "total_theme_indicators": len(indicators),
+            "execution_time_ms": round((time.time() - start) * 1000, 2)
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ==================== 主题聚合工具 ====================
+
+
+def _get_indicator_theme_internal(indicator_id: str) -> dict:
+    """内部方法：获取单个指标的 THEME 信息
+
+    从业务路径中提取 type=THEME 的节点，与 get_indicator_full_path 的路径查询逻辑一致。
+    """
+    try:
+        with get_driver().session() as session:
+            business_labels = ['SECTOR', 'CATEGORY', 'THEME', 'SUBPATH', 'INDICATOR',
+                               'INSIGHT_TEMPLATE', 'COMBINEDQUERY_TEMPLATE']
+
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(indicator)
+            WHERE entry.alias = '自主分析' AND indicator.id = $indicator_id
+              AND labels(entry)[0] IN $business_labels
+              AND labels(indicator)[0] IN $business_labels
+            RETURN [node in nodes(path) | {
+                id: node.id,
+                alias: node.alias,
+                type: labels(node)[0],
+                level: node.level
+            }] as path_nodes
+            """
+            result = session.run(cypher, indicator_id=indicator_id, business_labels=business_labels).single()
+
+            if not result:
+                return None
+
+            # 从路径节点中提取 THEME 类型的节点
+            for node in result["path_nodes"]:
+                if node["type"] == "THEME":
+                    return {
+                        "indicator_id": indicator_id,
+                        "theme_id": node["id"],
+                        "theme_alias": node["alias"],
+                        "theme_level": node.get("level"),
+                    }
+            return None
+    except Exception:
+        return None
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -> str:
+    """从指标列表中聚合候选主题（按频次排序）
+
+    对 matched_indicators 中的每个指标调用 _get_indicator_theme_internal 获取其 THEME 信息，
+    统计各 THEME 出现频次，按频次降序排列，取 Top K 作为初始候选主题。
+
+    用于主题模板推荐 Skill 阶段 0.5 整理输出 → 阶段 1 的过渡。
+
+    Args:
+        matched_indicators: 指标 ID 列表（来自阶段 0 的 matched_indicators）
+        top_k: 返回候选主题数量，默认 3
+
+    Returns:
+        {
+            "success": true,
+            "candidate_themes": [
+                {
+                    "theme_id": "THEME.xxx",
+                    "theme_alias": "对公贷款借据",
+                    "theme_level": 5,
+                    "frequency": 15,
+                    "matched_indicator_ids": ["INDICATOR.xxx", "..."]
+                }
+            ],
+            "total_themes": 5,
+            "total_indicators": 30,
+            "execution_time_ms": 120.5
+        }
+    """
+    start = time.time()
+    try:
+        top_k = min(max(1, top_k), 20)
+        # 限制最多 100 个指标
+        matched_indicators = matched_indicators[:100] if matched_indicators else []
+
+        if not matched_indicators:
+            return json.dumps({
+                "success": True,
+                "candidate_themes": [],
+                "total_themes": 0,
+                "total_indicators": 0,
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False, indent=2)
+
+        # Python 循环：每个指标调用一次 _get_indicator_theme_internal
+        theme_map: dict = {}  # theme_id -> {theme_alias, theme_level, matched_indicator_ids}
+
+        for indicator_id in matched_indicators:
+            result = _get_indicator_theme_internal(indicator_id)
+            if result:
+                theme_id = result["theme_id"]
+                if theme_id not in theme_map:
+                    theme_map[theme_id] = {
+                        "theme_alias": result["theme_alias"],
+                        "theme_level": result.get("theme_level"),
+                        "matched_indicator_ids": []
+                    }
+                theme_map[theme_id]["matched_indicator_ids"].append(indicator_id)
+
+        # 按频次降序排列，取 Top K
+        sorted_themes = sorted(
+            theme_map.items(),
+            key=lambda x: len(x[1]["matched_indicator_ids"]),
+            reverse=True
+        )[:top_k]
+
+        candidate_themes = []
+        for theme_id, info in sorted_themes:
+            matched_ids = info["matched_indicator_ids"]
+            candidate_themes.append({
+                "theme_id": theme_id,
+                "theme_alias": info["theme_alias"],
+                "theme_level": info.get("theme_level") or 0,
+                "frequency": len(matched_ids),
+                "matched_indicator_ids": matched_ids
+            })
+
+        return json.dumps({
+            "success": True,
+            "candidate_themes": candidate_themes,
+            "total_themes": len(candidate_themes),
+            "total_indicators": len(matched_indicators),
+            "execution_time_ms": round((time.time() - start) * 1000, 2)
         }, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)

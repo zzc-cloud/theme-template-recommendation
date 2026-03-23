@@ -61,12 +61,12 @@ pip install -r requirements.txt
 ## MCP 工具
 
 ### theme-ontology（Neo4j - 8 个工具）
-- `search_terms_by_keyword` - 搜索业务术语
-- `get_tables_by_term` - 术语→关联表
+- `aggregate_themes_from_indicators` - 从指标列表聚合候选主题（按频次排序）
+- `get_theme_filter_indicators` - 获取主题下全量筛选指标（时间+机构）
+- `get_theme_analysis_indicators` - 获取主题下全量分析指标
 - `get_indicator_full_path` - 指标完整路径
 - `get_indicator_field_mapping` - 指标字段映射
 - `get_table_terms` - 表字段术语描述
-- `batch_get_indicators_themes` - 批量提取 THEME
 - `get_theme_templates_with_coverage` - 主题模板+覆盖率
 - `get_template_indicators` - 模板包含的指标
 

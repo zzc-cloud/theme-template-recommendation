@@ -32,16 +32,18 @@
 |------|------|------|
 | `search_indicators_by_vector` | **向量化语义搜索魔数师指标** | 0 |
 
-### theme-ontology（Neo4j - 7 个工具）
+### theme-ontology（Neo4j - 8 个工具）
 
 | 工具 | 功能 | 阶段 |
 |------|------|------|
-| `batch_get_indicators_themes` | 批量提取 THEME | 0, 2 |
+| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序） | 1 |
+| `get_theme_filter_indicators` | 获取主题下全量筛选指标（时间+机构） | 1 |
+| `get_theme_analysis_indicators` | 获取主题下全量分析指标 | 1 |
+| `get_indicator_field_mapping` | 【语义增强】指标字段映射 | 1 |
+| `get_table_terms` | 【语义增强】表字段术语描述 | 1 |
 | `get_indicator_full_path` | 指标完整路径（含 THEME） | 1 |
-| `get_indicator_field_mapping` | 指标字段映射 | 1 |
-| `get_table_terms` | 表字段术语描述 | 1 |
-| `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 3 |
-| `get_template_indicators` | 模板包含的指标 | 3 |
+| `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 2 |
+| `get_template_indicators` | 模板包含的指标 | 2 |
 
 ### theme-resources（MySQL - 3 个工具）
 
