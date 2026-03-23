@@ -21,3 +21,6 @@ mcp-server/venv/
 
 # MCP server config
 mcp-server/.env
+
+# Chroma vector database (large binary files)
+mcp-server/data/indicators_vector/
