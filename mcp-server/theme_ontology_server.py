@@ -67,31 +67,18 @@ def get_theme_templates_with_coverage(
         {
             "success": true,
             "theme_id": "...",
-            "matched_templates": [
-                {
-                    "template_id": "TEMPLATE.INSIGHT.xxx",
-                    "template_alias": "个人存款统计表",
-                    "template_description": "按机构统计个人存款余额",
-                    "usage_count": 256,
-                    "coverage_ratio": 1.0,
-                    "covered_indicator_ids": ["INDICATOR.xxx", "..."],
-                    "missing_indicator_ids": [],
-                    "all_template_indicators": [
-                        {
-                            "indicator_id": "...",
-                            "alias": "个人存款余额",
-                            "description": "..."
-                        }
-                    ]
-                }
-            ],
+            "has_qualified_templates": true,  // 是否有覆盖率 >= 80% 的达标模板
+            "matched_templates": [...],       // 达标模板（>= 80%）或降级推荐模板
+            "fallback_reason": "...",         // 降级原因（仅当无达标模板时）
             "execution_time_ms": 45.2
         }
 
-    覆盖率计算逻辑：
-    - 覆盖率 = 模板覆盖的用户指标数 / 用户需要的指标总数
-    - missing_indicator_ids = 用户指标 - 模板指标交集
-    - all_template_indicators 包含模板下所有指标的详情（id、alias、description）
+    过滤逻辑：
+    1. 先过滤掉 heat = 0 的模板（无使用记录不参与推荐）
+    2. 在 heat > 0 的模板中查找覆盖率 >= 80% 的达标模板
+    3. 如果没有 >= 80% 的模板，降级推荐：
+       - 覆盖率最高的模板（1个）
+       - 热度最高的模板（1个，如果与覆盖率最高不同）
     """
     start = time.time()
     try:
@@ -110,9 +97,9 @@ def get_theme_templates_with_coverage(
             user_indicator_set = set(matched_indicator_ids)
             user_indicator_count = len(user_indicator_set)
 
-            # 查询主题下的模板及其包含的所有指标
+            # 查询主题下的模板及其包含的所有指标（只取 heat > 0 的模板）
             cypher = f"""
-            MATCH (t) WHERE t.theme_id = $theme_id {type_filter}
+            MATCH (t) WHERE t.theme_id = $theme_id AND t.heat > 0 {type_filter}
             OPTIONAL MATCH (t)-[:CONTAINS]->(i:INDICATOR)
             WITH t, collect({{id: i.id, alias: i.alias, description: i.description}}) as template_indicators
             WHERE size(template_indicators) > 0
@@ -130,7 +117,7 @@ def get_theme_templates_with_coverage(
                 top_k=top_k
             )
 
-            matched_templates = []
+            all_templates = []
             for row in result:
                 template_indicators = row["template_indicators"] or []
                 template_indicator_ids = set(i["id"] for i in template_indicators if i.get("id"))
@@ -143,7 +130,7 @@ def get_theme_templates_with_coverage(
                 # 缺失指标 = 用户指标 - 模板指标交集
                 missing_ids = list(user_indicator_set - template_indicator_ids)
 
-                matched_templates.append({
+                all_templates.append({
                     "template_id": row["template_id"],
                     "template_alias": row["template_alias"],
                     "template_description": row["template_description"],
@@ -162,17 +149,59 @@ def get_theme_templates_with_coverage(
                     ]
                 })
 
-            # 按覆盖率降序排序
-            matched_templates.sort(key=lambda x: x["coverage_ratio"], reverse=True)
+            # 过滤出覆盖率 >= 80% 的达标模板
+            qualified_templates = [t for t in all_templates if t["coverage_ratio"] >= 0.8]
 
-        return json.dumps({
-            "success": True,
-            "theme_id": theme_id,
-            "template_type": template_type,
-            "matched_templates": matched_templates,
-            "matched_template_count": len(matched_templates),
-            "execution_time_ms": round((time.time() - start) * 1000, 2)
-        }, ensure_ascii=False, indent=2)
+            if qualified_templates:
+                # 有达标模板，按覆盖率降序排序
+                qualified_templates.sort(key=lambda x: x["coverage_ratio"], reverse=True)
+                return json.dumps({
+                    "success": True,
+                    "theme_id": theme_id,
+                    "template_type": template_type,
+                    "has_qualified_templates": True,
+                    "matched_templates": qualified_templates,
+                    "matched_template_count": len(qualified_templates),
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+            else:
+                # 无达标模板，降级推荐：覆盖率最高 + 热度最高
+                if not all_templates:
+                    return json.dumps({
+                        "success": True,
+                        "theme_id": theme_id,
+                        "template_type": template_type,
+                        "has_qualified_templates": False,
+                        "matched_templates": [],
+                        "matched_template_count": 0,
+                        "fallback_reason": "该主题下无热度大于 0 的模板",
+                        "execution_time_ms": round((time.time() - start) * 1000, 2)
+                    }, ensure_ascii=False)
+
+                # 按覆盖率降序排序，取覆盖率最高的
+                sorted_by_coverage = sorted(all_templates, key=lambda x: x["coverage_ratio"], reverse=True)
+                highest_coverage = sorted_by_coverage[0]
+
+                # 按热度降序排序，取热度最高的
+                sorted_by_heat = sorted(all_templates, key=lambda x: x["usage_count"], reverse=True)
+                highest_heat = sorted_by_heat[0]
+
+                # 去重合并
+                fallback_templates = [highest_coverage]
+                if highest_heat["template_id"] != highest_coverage["template_id"]:
+                    fallback_templates.append(highest_heat)
+
+                return json.dumps({
+                    "success": True,
+                    "theme_id": theme_id,
+                    "template_type": template_type,
+                    "has_qualified_templates": False,
+                    "matched_templates": fallback_templates,
+                    "matched_template_count": len(fallback_templates),
+                    "fallback_reason": f"无覆盖率 >= 80% 的达标模板，降级推荐覆盖率最高（{highest_coverage['coverage_ratio']*100:.0f}%）和热度最高（{highest_heat['usage_count']}次使用）的模板",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
@@ -203,6 +232,8 @@ def get_theme_filter_indicators(theme_id: str) -> str:
     筛选指标识别规则：
     - 时间筛选指标：别名包含 "数据日期" 或 "ETL数据日期"
     - 机构筛选指标：别名匹配模式 "%级机构名称/%级机构编号/%管理机构名称/%管理机构编号/%账务机构名称/%账务机构编号"
+
+    注意：返回结果按别名去重，同一别名的指标只保留一个。
     """
     start = time.time()
     try:
@@ -214,7 +245,7 @@ def get_theme_filter_indicators(theme_id: str) -> str:
             MATCH (theme:THEME {id: $theme_id})
             MATCH (theme)-[:HAS_CHILD*1..2]->(i:INDICATOR)
             RETURN i.id as id, i.alias as alias,
-                   i.path as path, i.description as description
+                   i.description as description
             """
             result = session.run(cypher, theme_id=theme_id)
             indicators = [dict(r) for r in result]
@@ -227,7 +258,7 @@ def get_theme_filter_indicators(theme_id: str) -> str:
                     "org_filter_indicators": [],
                     "total_count": 0,
                     "execution_time_ms": round((time.time() - start) * 1000, 2)
-                }, ensure_ascii=False, indent=2)
+                }, ensure_ascii=False)
 
             # 时间筛选指标：别名包含 "数据日期" 或 "ETL数据日期"
             time_patterns = ["数据日期", "ETL数据日期"]
@@ -239,11 +270,18 @@ def get_theme_filter_indicators(theme_id: str) -> str:
                 "账务机构名称", "账务机构编号"
             ]
 
+            # 按别名去重：同一个别名只保留第一个
+            seen_aliases = set()
             time_filter = []
             org_filter = []
 
             for ind in indicators:
                 alias = ind.get("alias", "") or ""
+
+                # 按别名去重
+                if alias in seen_aliases:
+                    continue
+                seen_aliases.add(alias)
 
                 # 时间筛选匹配
                 is_time = any(p in alias for p in time_patterns)
@@ -272,13 +310,13 @@ def get_theme_filter_indicators(theme_id: str) -> str:
             "org_filter_count": len(org_filter),
             "total_count": len(indicators),
             "execution_time_ms": round((time.time() - start) * 1000, 2)
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
+def get_theme_analysis_indicators(theme_id: str) -> str:
     """获取主题下全量的分析指标
 
     分析指标指除筛选指标之外的所有业务分析指标，用于数据分析场景。
@@ -286,7 +324,6 @@ def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
 
     Args:
         theme_id: THEME 节点 ID
-        top_k: 返回结果数量上限，默认200（最大500）
 
     Returns:
         {
@@ -306,22 +343,20 @@ def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
     说明：
     - 分析指标 = 主题全量指标 - 筛选指标（时间 + 机构）
     - 返回结果按指标别名排序，便于浏览
+    - 返回结果按别名去重，同一别名的指标只保留一个。
     """
     start = time.time()
     try:
-        top_k = min(max(1, top_k), 500)
-
         with get_driver().session() as session:
             # 获取主题下全量 INDICATOR（通过 HAS_CHILD 关系，支持直接和间接连接）
             cypher = """
             MATCH (theme:THEME {id: $theme_id})
             MATCH (theme)-[:HAS_CHILD*1..2]->(i:INDICATOR)
             RETURN i.id as id, i.alias as alias,
-                   i.path as path, i.description as description
+                   i.description as description
             ORDER BY i.alias
-            LIMIT $top_k
             """
-            result = session.run(cypher, theme_id=theme_id, top_k=top_k)
+            result = session.run(cypher, theme_id=theme_id)
             indicators = [dict(r) for r in result]
 
             if not indicators:
@@ -331,7 +366,7 @@ def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
                     "analysis_indicators": [],
                     "total_count": 0,
                     "execution_time_ms": round((time.time() - start) * 1000, 2)
-                }, ensure_ascii=False, indent=2)
+                }, ensure_ascii=False)
 
             # 筛选指标识别规则（与分析指标互斥）
             time_patterns = ["数据日期", "ETL数据日期"]
@@ -341,9 +376,16 @@ def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
                 "账务机构名称", "账务机构编号"
             ]
 
+            # 按别名去重：同一个别名只保留第一个
+            seen_aliases = set()
             analysis_indicators = []
             for ind in indicators:
                 alias = ind.get("alias", "") or ""
+
+                # 按别名去重
+                if alias in seen_aliases:
+                    continue
+                seen_aliases.add(alias)
 
                 # 排除筛选指标：只要不匹配任一筛选模式，即为分析指标
                 is_time_filter = any(p in alias for p in time_patterns)
@@ -363,7 +405,7 @@ def get_theme_analysis_indicators(theme_id: str, top_k: int = 200) -> str:
             "analysis_indicator_count": len(analysis_indicators),
             "total_theme_indicators": len(indicators),
             "execution_time_ms": round((time.time() - start) * 1000, 2)
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
@@ -455,7 +497,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
                 "total_themes": 0,
                 "total_indicators": 0,
                 "execution_time_ms": round((time.time() - start) * 1000, 2)
-            }, ensure_ascii=False, indent=2)
+            }, ensure_ascii=False)
 
         # Python 循环：每个指标调用一次 _get_indicator_theme_internal
         theme_map: dict = {}  # theme_id -> {theme_alias, theme_level, matched_indicator_ids}
@@ -496,7 +538,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
             "total_themes": len(candidate_themes),
             "total_indicators": len(matched_indicators),
             "execution_time_ms": round((time.time() - start) * 1000, 2)
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
