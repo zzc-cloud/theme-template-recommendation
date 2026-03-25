@@ -5,10 +5,11 @@ LangGraph 节点函数
 """
 
 import logging
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from langgraph.config import get_stream_writer
+from langgraph.types import interrupt
 
 from .. import config
 from ..llm import client as llm_client
@@ -17,9 +18,128 @@ from ..tools import template_tools, theme_tools, vector_search
 from .state import (
     AgentState,
     FilterIndicator,
+    UserConfirmation,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 并行执行辅助函数
+# ═══════════════════════════════════════════════════════════════════════
+
+def _search_concepts_parallel(concepts: list[str], top_k: int) -> dict[str, list]:
+    """并行向量搜索"""
+    if not concepts:
+        return {}
+
+    results = {}
+    max_workers = min(len(concepts), 5)  # 最多5个并行
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_concept = {
+            executor.submit(vector_search.search_indicators_by_vector, concept, top_k): concept
+            for concept in concepts
+        }
+
+        for future in as_completed(future_to_concept):
+            concept = future_to_concept[future]
+            try:
+                result = future.result()
+                if result.get("success"):
+                    results[concept] = result.get("indicators", [])
+                else:
+                    results[concept] = []
+            except Exception as e:
+                logger.warning(f"向量搜索失败 [{concept}]: {e}")
+                results[concept] = []
+
+    return results
+
+
+def _judge_theme_parallel(
+    theme: dict,
+    user_question: str,
+    analysis_dimensions: list,
+) -> dict | None:
+    """并行主题裁决辅助函数"""
+    theme_id = theme["theme_id"]
+    theme_alias = theme["theme_alias"]
+    theme_path = f"自主分析 > {theme_alias}"
+    filter_inds = theme.get("filter_indicators_detail", [])
+    analysis_inds = theme.get("analysis_indicators_detail", [])
+
+    # 构建字符串
+    dim_str = _build_analysis_dimensions_str(analysis_dimensions)
+    filter_str = _build_filter_indicators_str(filter_inds)
+    analysis_str = _build_analysis_indicators_str(analysis_inds)
+
+    try:
+        judgment = llm_client.judge_theme(
+            user_question=user_question,
+            analysis_dimensions_str=dim_str,
+            theme_alias=theme_alias,
+            theme_path=theme_path,
+            filter_indicators_str=filter_str,
+            analysis_indicators_str=analysis_str,
+        )
+        return {
+            "theme": theme,
+            "judgment": judgment,
+        }
+    except Exception as e:
+        logger.warning(f"主题裁决失败 {theme_alias}: {e}")
+        return {
+            "theme": theme,
+            "judgment": None,
+        }
+
+
+def _analyze_template_parallel(
+    template: dict,
+    user_question: str,
+    analysis_dimensions: list,
+) -> dict:
+    """并行模板分析辅助函数"""
+    template_id = template.get("template_id", "")
+    template_alias = template.get("template_alias", "")
+    template_description = template.get("template_description", "")
+    coverage_ratio = f"{template.get('coverage_ratio', 0) * 100:.0f}%"
+    all_template_inds = template.get("all_template_indicators", [])
+    all_inds_str = _build_template_indicators_str(all_template_inds)
+
+    missing_ids = template.get("missing_indicator_ids", [])
+    missing_inds_str = "（无需补充）"
+    if missing_ids:
+        missing_inds_str = "\n".join(f"- {mid}" for mid in missing_ids[:10])
+
+    dim_str = _build_analysis_dimensions_str(analysis_dimensions)
+
+    try:
+        usability = llm_client.analyze_template_usability(
+            user_question=user_question,
+            analysis_dimensions_str=dim_str,
+            template_alias=template_alias,
+            template_description=template_description,
+            coverage_ratio=coverage_ratio,
+            all_template_indicators_str=all_inds_str,
+            missing_indicators_str=missing_inds_str,
+        )
+        return {
+            "template": template,
+            "usability": usability.model_dump(),
+        }
+    except Exception as e:
+        logger.warning(f"模板可用性分析失败 {template_alias}: {e}")
+        return {
+            "template": template,
+            "usability": {
+                "template_id": template_id,
+                "overall_usability": "缺口较大建议谨慎",
+                "usability_summary": f"分析失败: {e}",
+                "missing_indicator_analysis": [],
+            },
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -32,7 +152,8 @@ def extract_phrases(state: AgentState) -> dict:
     writer = get_stream_writer()
     writer({"stage": "extract_phrases", "step": "extracting_phrases", "status": "in_progress"})
 
-    result = llm_client.extract_phrases(user_question)
+    conversation_history = state.get("conversation_history", [])
+    result = llm_client.extract_phrases(user_question, conversation_history=conversation_history)
     phrases = result.phrases if result.phrases else []
 
     writer({"stage": "extract_phrases", "step": "extracting_phrases", "status": "done", "phrases_count": len(phrases)})
@@ -83,20 +204,19 @@ def classify_and_iterate(state: AgentState) -> dict:
 
         writer({"stage": "classify_and_iterate", "step": "searching", "status": "in_progress", "round": iteration_round, "concepts": current_concepts})
 
-        # 对每个分析概念执行向量搜索
-        for concept in current_concepts:
-            result = vector_search.search_indicators_by_vector(
-                concept, top_k=config.VECTOR_SEARCH_TOP_K
-            )
-            if result.get("success"):
-                round_search_results[concept] = result.get("indicators", [])
-                # 合并到总结果（去重）
-                if concept not in search_results:
-                    search_results[concept] = []
-                existing_ids = {i["id"] for i in search_results[concept]}
-                for ind in result.get("indicators", []):
-                    if ind["id"] not in existing_ids:
-                        search_results[concept].append(ind)
+        # 使用并行搜索辅助函数
+        round_search_results = _search_concepts_parallel(
+            current_concepts, top_k=config.VECTOR_SEARCH_TOP_K
+        )
+
+        # 合并到总结果（去重）
+        for concept, indicators in round_search_results.items():
+            if concept not in search_results:
+                search_results[concept] = []
+            existing_ids = {i["id"] for i in search_results[concept]}
+            for ind in indicators:
+                if ind["id"] not in existing_ids:
+                    search_results[concept].append(ind)
 
         # 构建搜索结果字符串用于 LLM 评估
         search_results_str = _build_search_results_str(search_results)
@@ -170,15 +290,76 @@ def classify_and_iterate(state: AgentState) -> dict:
         norm_question = user_question
 
     writer({"stage": "classify_and_iterate", "step": "completed", "status": "done", "iterations": iteration_round})
-    return {
-        "filter_indicators": filter_indicators,
-        "search_results": search_results,
-        "iteration_round": iteration_round,
-        "iteration_log": iteration_log,
-        "analysis_dimensions": analysis_dimensions,
-        "normalized_question": norm_question,
-        "is_low_confidence": is_low_confidence,
-    }
+
+    # ── 出口判断：低置信度 vs 正常收敛 ──
+    if is_low_confidence:
+        # 低置信度出口
+        low_conf_concepts = [
+            d["search_term"]
+            for d in analysis_dimensions
+            if d["indicators"] and d["indicators"][0]["similarity_score"] < config.LOW_CONFIDENCE_THRESHOLD
+        ]
+        search_results_str = _build_search_results_str(search_results)
+        try:
+            low_conf_result = llm_client.handle_low_confidence(
+                user_question=user_question,
+                low_confidence_concepts=low_conf_concepts,
+                search_results_str=search_results_str,
+            )
+            low_confidence_message = low_conf_result.user_message
+            low_confidence_suggestions = low_conf_result.suggestions
+        except Exception as e:
+            logger.warning(f"低置信度处理失败: {e}")
+            low_confidence_message = "以下分析概念无法精确匹配，可能需要更清晰的描述："
+            low_confidence_suggestions = []
+
+        return {
+            "filter_indicators": filter_indicators,
+            "search_results": search_results,
+            "iteration_round": iteration_round,
+            "iteration_log": iteration_log,
+            "analysis_dimensions": analysis_dimensions,
+            "normalized_question": norm_question,
+            "is_low_confidence": is_low_confidence,
+            "low_confidence_message": low_confidence_message,
+            "low_confidence_suggestions": low_confidence_suggestions,
+            "pending_confirmation": None,
+            "user_confirmation": None,
+        }
+    else:
+        # 正常收敛出口：构建待确认数据
+        filter_display = [
+            {"alias": f.get("alias", ""), "value": f.get("value", ""), "type": f.get("type", "")}
+            for f in filter_indicators
+        ]
+        dimension_options = [
+            {
+                "search_term": d["search_term"],
+                "converged": d["converged"],
+                "top_indicator_aliases": [i["alias"] for i in d["indicators"][:5]],
+                "top_indicators": d["indicators"][:5],
+            }
+            for d in analysis_dimensions
+        ]
+        pending_confirmation = {
+            "filter_display": filter_display,
+            "dimension_options": dimension_options,
+            "normalized_question": norm_question,
+            "message": "以下筛选条件已自动识别，请确认分析维度：",
+        }
+        return {
+            "filter_indicators": filter_indicators,
+            "search_results": search_results,
+            "iteration_round": iteration_round,
+            "iteration_log": iteration_log,
+            "analysis_dimensions": analysis_dimensions,
+            "normalized_question": norm_question,
+            "is_low_confidence": False,
+            "pending_confirmation": pending_confirmation,
+            "user_confirmation": None,
+            "low_confidence_message": "",
+            "low_confidence_suggestions": [],
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -237,85 +418,73 @@ def complete_indicators(state: AgentState) -> dict:
 
 
 def judge_themes(state: AgentState) -> dict:
-    """阶段 1.3：LLM 裁决 - 判断主题可用性 + 指标精筛"""
+    """阶段 1.3：LLM 裁决 - 判断主题可用性 + 指标精筛（并行化优化版））"""
     user_question = state["user_question"]
     analysis_dimensions = state.get("analysis_dimensions", [])
     candidate_themes = state.get("candidate_themes", [])
     writer = get_stream_writer()
 
     writer({"stage": "judge_themes", "step": "judging", "status": "in_progress", "theme_count": len(candidate_themes)})
+
+    if not candidate_themes:
+        writer({"stage": "judge_themes", "step": "completed", "status": "done"})
+        return {"recommended_themes": []}
+
     recommended_themes = []
+    max_workers = min(len(candidate_themes), 3)  # 最多3个并行
 
-    for i, theme in enumerate(candidate_themes):
-        writer({"stage": "judge_themes", "step": "judging_theme", "status": "in_progress", "theme_index": i + 1, "theme_alias": theme.get("theme_alias", "")})
-        theme_id = theme["theme_id"]
-        theme_alias = theme["theme_alias"]
-        theme_path = f"自主分析 > {theme_alias}"
-        filter_inds = theme.get("filter_indicators_detail", [])
-        analysis_inds = theme.get("analysis_indicators_detail", [])
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_theme = {
+            executor.submit(
+                _judge_theme_parallel, theme, user_question, analysis_dimensions
+            ): theme
+            for theme in candidate_themes
+        }
 
-        # 构建分析维度字符串
-        dim_str = _build_analysis_dimensions_str(analysis_dimensions)
+        for future in as_completed(future_to_theme):
+            theme = future_to_theme[future]
+            result = future.result()
 
-        # 构建筛选指标字符串
-        filter_str = _build_filter_indicators_str(filter_inds)
-
-        # 构建分析指标字符串
-        analysis_str = _build_analysis_indicators_str(analysis_inds)
-
-        # LLM 裁决（结构化输出）
-        try:
-            judgment = llm_client.judge_theme(
-                user_question=user_question,
-                analysis_dimensions_str=dim_str,
-                theme_alias=theme_alias,
-                theme_path=theme_path,
-                filter_indicators_str=filter_str,
-                analysis_indicators_str=analysis_str,
-            )
-        except Exception as e:
-            logger.warning(f"主题裁决失败 {theme_alias}: {e}")
-            judgment = None
-
-        if judgment:
-            recommended_themes.append({
-                "theme_id": theme_id,
-                "theme_alias": theme_alias,
-                "theme_level": theme.get("theme_level", 0),
-                "is_supported": judgment.is_supported,
-                "support_reason": judgment.support_reason,
-                "selected_filter_indicators": [
-                    {
-                        "indicator_id": si.indicator_id,
-                        "alias": si.alias,
-                        "type": si.type,
-                        "reason": si.reason,
-                    }
-                    for si in judgment.selected_filter_indicators
-                ],
-                "selected_analysis_indicators": [
-                    {
-                        "indicator_id": si.indicator_id,
-                        "alias": si.alias,
-                        "type": si.type,
-                        "reason": si.reason,
-                        "description": si.reason,
-                    }
-                    for si in judgment.selected_analysis_indicators
-                ],
-                "unsupported_dimensions": judgment.unsupported_dimensions,
-            })
-        else:
-            recommended_themes.append({
-                "theme_id": theme_id,
-                "theme_alias": theme_alias,
-                "theme_level": theme.get("theme_level", 0),
-                "is_supported": False,
-                "support_reason": "裁决失败",
-                "selected_filter_indicators": [],
-                "selected_analysis_indicators": [],
-                "unsupported_dimensions": [],
-            })
+            judgment = result.get("judgment")
+            if judgment:
+                recommended_themes.append({
+                    "theme_id": theme["theme_id"],
+                    "theme_alias": theme["theme_alias"],
+                    "theme_level": theme.get("theme_level", 0),
+                    "is_supported": judgment.is_supported,
+                    "support_reason": judgment.support_reason,
+                    "selected_filter_indicators": [
+                        {
+                            "indicator_id": si.indicator_id,
+                            "alias": si.alias,
+                            "type": si.type,
+                            "reason": si.reason,
+                        }
+                        for si in judgment.selected_filter_indicators
+                    ],
+                    "selected_analysis_indicators": [
+                        {
+                            "indicator_id": si.indicator_id,
+                            "alias": si.alias,
+                            "type": si.type,
+                            "reason": si.reason,
+                            "description": si.reason,
+                        }
+                        for si in judgment.selected_analysis_indicators
+                    ],
+                    "unsupported_dimensions": judgment.unsupported_dimensions,
+                })
+            else:
+                recommended_themes.append({
+                    "theme_id": theme["theme_id"],
+                    "theme_alias": theme["theme_alias"],
+                    "theme_level": theme.get("theme_level", 0),
+                    "is_supported": False,
+                    "support_reason": "裁决失败",
+                    "selected_filter_indicators": [],
+                    "selected_analysis_indicators": [],
+                    "unsupported_dimensions": [],
+                })
 
     writer({"stage": "judge_themes", "step": "completed", "status": "done"})
     return {"recommended_themes": recommended_themes}
@@ -422,49 +591,120 @@ def analyze_templates(state: AgentState) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 用户交互节点
+# ═══════════════════════════════════════════════════════════════════════
+
+def wait_for_confirmation(state: AgentState) -> dict:
+    """等待用户确认分析维度"""
+    writer = get_stream_writer()
+
+    if state.get("is_low_confidence"):
+        # 低置信度中断
+        writer({"stage": "wait_for_confirmation", "step": "low_confidence", "status": "interrupted"})
+        interrupt({
+            "type": "low_confidence",
+            "message": state.get("low_confidence_message", ""),
+            "suggestions": state.get("low_confidence_suggestions", []),
+            "action_required": "请修改问题描述后重新提交（使用新的 thread_id）",
+        })
+        # interrupt 之后如果被错误 resume，直接报错阻断流程
+        raise ValueError("低置信度流程不支持 resume，请修改问题描述后重新提交")
+    else:
+        # 正常确认流程
+        writer({"stage": "wait_for_confirmation", "step": "waiting_confirmation", "status": "in_progress"})
+        user_input = interrupt(state.get("pending_confirmation"))
+
+        confirmed_dimensions = user_input.get("confirmed_dimensions", [])
+        confirmed_question = user_input.get("confirmed_question", state.get("normalized_question", ""))
+
+        # 过滤 analysis_dimensions，只保留用户确认的维度
+        filtered_dimensions = [
+            d for d in state.get("analysis_dimensions", [])
+            if d.get("search_term") in confirmed_dimensions
+        ]
+
+        user_confirmation: UserConfirmation = {
+            "confirmed_dimensions": confirmed_dimensions,
+            "confirmed_question": confirmed_question,
+        }
+
+        return {
+            "analysis_dimensions": filtered_dimensions,
+            "normalized_question": confirmed_question,
+            "pending_confirmation": None,
+            "user_confirmation": user_confirmation,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 完成节点
 # ═══════════════════════════════════════════════════════════════════════
 
 def format_output(state: AgentState) -> dict:
     """整理最终输出"""
+    # 生成 Markdown 格式的推荐结果
+    markdown_output = _format_markdown_output(state)
+
+    # 追加本轮对话到历史
+    history = list(state.get("conversation_history", []))
+    history.append({
+        "round": len(history) + 1,
+        "user_question": state["user_question"],
+        "normalized_question": state.get("normalized_question", ""),
+        "filter_indicators": state.get("filter_indicators", []),
+        "analysis_dimensions": [
+            {  # 只保留 top3 指标摘要
+                "search_term": d["search_term"],
+                "converged": d["converged"],
+                "indicators": d["indicators"][:3],
+            }
+            for d in state.get("analysis_dimensions", [])
+        ],
+    })
+
+    final_output = {
+        "user_question": state["user_question"],
+        "normalized_question": state.get("normalized_question", ""),
+        "filter_indicators": state.get("filter_indicators", []),
+        "analysis_dimensions": state.get("analysis_dimensions", []),
+        "is_low_confidence": state.get("is_low_confidence", False),
+        "conversation_round": len(history),
+        "recommended_themes": [
+            {
+                "theme_id": t["theme_id"],
+                "theme_alias": t["theme_alias"],
+                "theme_level": t["theme_level"],
+                "is_supported": t["is_supported"],
+                "support_reason": t["support_reason"],
+                "selected_filter_indicators": t["selected_filter_indicators"],
+                "selected_analysis_indicators": t["selected_analysis_indicators"],
+            }
+            for t in state.get("recommended_themes", [])
+        ],
+        "recommended_templates": [
+            {
+                "template_id": t["template_id"],
+                "template_alias": t["template_alias"],
+                "template_description": t.get("template_description", ""),
+                "theme_alias": t.get("theme_alias", ""),
+                "usage_count": t.get("usage_count", 0),
+                "coverage_ratio": t.get("coverage_ratio", 0),
+                "has_qualified_templates": t.get("has_qualified_templates", False),
+                "fallback_reason": t.get("fallback_reason", ""),
+                "usability": t.get("usability", {}),
+            }
+            for t in state.get("recommended_templates", [])
+        ],
+        "iteration_info": {
+            "rounds": state.get("iteration_round", 0),
+            "log": state.get("iteration_log", []),
+        },
+        "markdown": markdown_output,
+    }
+
     return {
-        "final_output": {
-            "user_question": state["user_question"],
-            "normalized_question": state.get("normalized_question", ""),
-            "filter_indicators": state.get("filter_indicators", []),
-            "analysis_dimensions": state.get("analysis_dimensions", []),
-            "is_low_confidence": state.get("is_low_confidence", False),
-            "recommended_themes": [
-                {
-                    "theme_id": t["theme_id"],
-                    "theme_alias": t["theme_alias"],
-                    "theme_level": t["theme_level"],
-                    "is_supported": t["is_supported"],
-                    "support_reason": t["support_reason"],
-                    "selected_filter_indicators": t["selected_filter_indicators"],
-                    "selected_analysis_indicators": t["selected_analysis_indicators"],
-                }
-                for t in state.get("recommended_themes", [])
-            ],
-            "recommended_templates": [
-                {
-                    "template_id": t["template_id"],
-                    "template_alias": t["template_alias"],
-                    "template_description": t.get("template_description", ""),
-                    "theme_alias": t.get("theme_alias", ""),
-                    "usage_count": t.get("usage_count", 0),
-                    "coverage_ratio": t.get("coverage_ratio", 0),
-                    "has_qualified_templates": t.get("has_qualified_templates", False),
-                    "fallback_reason": t.get("fallback_reason", ""),
-                    "usability": t.get("usability", {}),
-                }
-                for t in state.get("recommended_templates", [])
-            ],
-            "iteration_info": {
-                "rounds": state.get("iteration_round", 0),
-                "log": state.get("iteration_log", []),
-            },
-        }
+        "final_output": final_output,
+        "conversation_history": history,
     }
 
 
@@ -515,6 +755,88 @@ def _build_analysis_indicators_str(analysis_inds: list) -> str:
         f"- {ind.get('alias', '')}"
         for ind in analysis_inds[:50]
     )
+
+
+def _format_markdown_output(state: AgentState) -> str:
+    """生成 Markdown 格式的推荐结果"""
+    lines = []
+    lines.append("# 主题模板推荐结果")
+    lines.append("")
+    lines.append(f"**问题**：{state['user_question']}")
+    normalized = state.get("normalized_question", "")
+    if normalized and normalized != state['user_question']:
+        lines.append(f"**规范化问题**：{normalized}")
+    lines.append("")
+
+    # 筛选指标
+    filter_inds = state.get("filter_indicators", [])
+    if filter_inds:
+        lines.append("## 筛选条件")
+        for f in filter_inds:
+            lines.append(f"- {f.get('alias', '')}：{f.get('value', '')}")
+        lines.append("")
+
+    # 推荐主题
+    themes = state.get("recommended_themes", [])
+    if themes:
+        lines.append("## 推荐主题")
+        for i, t in enumerate(themes, 1):
+            status = "✅ 支持" if t.get("is_supported") else "❌ 不支持"
+            lines.append(f"### {i}. {t.get('theme_alias', '')} {status}")
+            lines.append(f"- **主题 ID**：{t.get('theme_id', '')}")
+            if t.get("support_reason"):
+                lines.append(f"- **说明**：{t.get('support_reason', '')}")
+
+            # 选中筛选指标
+            selected_filter = t.get("selected_filter_indicators", [])
+            if selected_filter:
+                lines.append("- **筛选指标**：")
+                for ind in selected_filter:
+                    lines.append(f"  - {ind.get('alias', '')}")
+
+            # 选中的分析指标
+            selected_analysis = t.get("selected_analysis_indicators", [])
+            if selected_analysis:
+                lines.append(f"- **分析指标**（共 {len(selected_analysis)} 个）：")
+                for ind in selected_analysis[:10]:
+                    lines.append(f"  - {ind.get('alias', '')}")
+                if len(selected_analysis) > 10:
+                    lines.append(f"  - ... 还有 {len(selected_analysis) - 10} 个指标")
+            lines.append("")
+
+    # 推荐模板
+    templates = state.get("recommended_templates", [])
+    if templates:
+        lines.append("## 推荐模板")
+        for i, t in enumerate(templates, 1):
+            lines.append(f"### {i}. {t.get('template_alias', '')}")
+            lines.append(f"- **模板 ID**：{t.get('template_id', '')}")
+            coverage = t.get("coverage_ratio", 0)
+            lines.append(f"- **覆盖率**：{coverage * 100:.1f}%")
+            lines.append(f"- **使用次数**：{t.get('usage_count', 0)}")
+            if t.get("template_description"):
+                desc = t.get("template_description", "")
+                if len(desc) > 100:
+                    desc = desc[:100] + "..."
+                lines.append(f"- **描述**：{desc}")
+
+            # 可用性分析
+            usability = t.get("usability", {})
+            if usability:
+                overall = usability.get("overall_usability", "")
+                summary = usability.get("usability_summary", "")
+                if overall:
+                    lines.append(f"- **可用性**：{overall}")
+                if summary:
+                    lines.append(f"- **分析**：{summary}")
+            lines.append("")
+
+    # 如果没有推荐结果
+    if not themes and not templates:
+        lines.append("## 结果")
+        lines.append("未找到匹配的主题或模板，请尝试修改问题描述。")
+
+    return "\n".join(lines)
 
 
 def _build_template_indicators_str(template_inds: list) -> str:

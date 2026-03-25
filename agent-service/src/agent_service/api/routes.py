@@ -5,23 +5,24 @@ API 路由
 import json
 import logging
 import time
-import uuid
 from typing import AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from langgraph.types import Command
 from sse_starlette.sse import EventSourceResponse
 
 from ..graph import graph as agent_graph
 from ..graph.graph import get_checkpointer
 from .schemas import (
+    ConversationContext,
     FilterIndicatorResponse,
     IndicatorMatchResponse,
     RecommendRequest,
     RecommendResponse,
     RecommendedThemeResponse,
     RecommendedTemplateResponse,
+    ResumeRequest,
     SelectedIndicatorResponse,
-    StreamEvent,
     TemplateUsabilityResponse,
 )
 
@@ -32,7 +33,81 @@ router = APIRouter(prefix="/api/v1", tags=["recommend"])
 
 # ═════════════════════════════════════════════════════════════════
 # 辅助函数
-# ═════════════════════════════════════════════════════════════════
+# ════════���════════════════════════════════════════════════════════
+
+# 阶段完成时的 Markdown 文字映射
+STAGE_COMPLETE_TEXT = {
+    "extract_phrases": None,        # 已由 custom 事件覆盖
+    "classify_and_iterate": None,   # 已由 custom 事件覆盖
+    "wait_for_confirmation": None,  # interrupt 事件覆盖
+    "aggregate_themes": "│ ✅ **[1.1]** 候选主题聚合完成",
+    "complete_indicators": "│ ✅ **[1.2]** 全量指标补全完成",
+    "judge_themes": None,           # 已由 custom 事件覆盖
+    "retrieve_templates": "│ ✅ **[2.1]** 模板检索完成",
+    "analyze_templates": None,      # 已由 custom 事件覆盖
+    "format_output": "\n✅ **所有阶段执行完毕，正在生成推荐结果...**",
+}
+
+
+def translate_event_to_markdown(data: dict) -> str | None:
+    """将节点事件翻译为人类可读的 Markdown 进度文字"""
+    stage = data.get("stage", "")
+    step = data.get("step", "")
+    status = data.get("status", "")
+
+    # ── 阶段 0.1 词组提取 ──
+    if stage == "extract_phrases":
+        if status == "in_progress":
+            return "┌─────────────────────────────────────────\n│ **[0.1] 词组提取** 开始执行...\n└─────────────────────────────────────────"
+        if status == "done":
+            count = data.get("phrases_count", 0)
+            return f"│ ✅ 词组提取完成，共提取 **{count}** 个词组\n└─────────────────────────────────────────"
+
+    # ── 阶段 0.2/0.3 分类与迭代 ──
+    if stage == "classify_and_iterate":
+        if step == "classifying":
+            return "\n┌─────────────────────────────────────────\n│ **[0.2] 词组分类** 正在执行..."
+        if step == "searching":
+            round_num = data.get("round", 1)
+            concepts = data.get("concepts", [])
+            concepts_str = "、".join(f"`{c}`" for c in concepts)
+            return f"│ **[0.3] 第 {round_num} 轮迭代精炼**\n│   🔍 搜索词：{concepts_str}"
+        if step == "evaluating":
+            round_num = data.get("round", 1)
+            return f"│   🤖 LLM 评估第 {round_num} 轮搜索结果..."
+        if step == "completed":
+            iterations = data.get("iterations", 1)
+            return f"│ ✅ 迭代精炼完成，共 **{iterations}** 轮收敛\n└─────────────────────────────────────────"
+
+    # ── 阶段 0.4 等待确认 ──
+    if stage == "wait_for_confirmation":
+        if step == "waiting_confirmation":
+            return "\n┌─────────────────────────────────────────\n│ **[0.4] 等待用户确认分析维度** ⏸\n└─────────────────────────────────────────"
+        if step == "low_confidence":
+            return "\n┌─────────────────────────────────────────\n│ ⚠️ **低置信度** 无法精确匹配，等待用户修改描述\n└─────────────────────────────────────────"
+
+    # ── 阶段 1.3 主题裁决 ──
+    if stage == "judge_themes":
+        if step == "judging":
+            count = data.get("theme_count", 0)
+            return f"\n┌─────────────────────────────────────────\n│ **[1.3] 主题裁决** 正在评估 **{count}** 个候选主题..."
+        if step == "completed":
+            return "│ ✅ 主题裁决完成\n└─────────────────────────────────────────"
+
+    # ── 阶段 2.2 模板分析 ──
+    if stage == "analyze_templates":
+        if step == "analyzing":
+            count = data.get("template_count", 0)
+            return f"\n┌─────────────────────────────────────────\n│ **[2.2] 模板可用性分析** 共 **{count}** 个模板"
+        if step == "analyzing_template":
+            idx = data.get("template_index", "")
+            alias = data.get("template_alias", "")
+            return f"│   📄 分析模板 {idx}：**{alias}**..."
+        if step == "completed":
+            return "│ ✅ 模板分析完成\n└─────────────────────────────────────────"
+
+    return None  # 不需要翻译的事件
+
 
 def _build_response(
     final_output: dict,
@@ -145,6 +220,8 @@ def _build_response(
         recommended_templates=recommended_templates,
         execution_time_ms=execution_time_ms,
         iteration_rounds=final_output.get("iteration_info", {}).get("rounds", 0),
+        conversation_round=final_output.get("conversation_round", 1),
+        markdown=final_output.get("markdown", ""),
     )
 
 
@@ -152,76 +229,14 @@ def _build_response(
 # 路由
 # ═════════════════════════════════════════════════════════════════
 
-@router.post("/recommend", response_model=RecommendResponse)
-async def recommend(req: RecommendRequest) -> RecommendResponse:
-    """
-    同步推荐接口
-
-    接收用户问题，返回主题和模板推荐结果
-    """
-    request_id = str(uuid.uuid4())
-    start_time = time.time()
-
-    logger.info(f"[{request_id}] 开始处理请求: {req.question}")
-
-    try:
-        agent = agent_graph.get_agent()
-
-        # 初始化状态
-        initial_state = {
-            "user_question": req.question,
-            "top_k_themes": req.top_k_themes,
-            "top_k_templates": req.top_k_templates,
-            # 以下为默认值
-            "extracted_phrases": [],
-            "filter_indicators": [],
-            "analysis_dimensions": [],
-            "normalized_question": "",
-            "search_results": {},
-            "iteration_round": 0,
-            "iteration_log": [],
-            "is_low_confidence": False,
-            "candidate_themes": [],
-            "recommended_themes": [],
-            "recommended_templates": [],
-            "final_output": {},
-            "execution_time_ms": 0.0,
-            "error": None,
-        }
-
-        result = await agent.ainvoke(
-            initial_state,
-            config={"configurable": {"thread_id": request_id}},
-        )
-
-        execution_time_ms = (time.time() - start_time) * 1000
-        logger.info(
-            f"[{request_id}] 处理完成，耗时: {execution_time_ms:.0f}ms"
-        )
-
-        if result.get("error"):
-            logger.warning(f"[{request_id}] Agent 执行出错: {result['error']}")
-
-        return _build_response(
-            result.get("final_output", {}),
-            execution_time_ms,
-            request_id,
-        )
-
-    except Exception as e:
-        execution_time_ms = (time.time() - start_time) * 1000
-        logger.exception(f"[{request_id}] 请求处理失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/recommend/stream")
+@router.post("/recommend")
 async def recommend_stream(req: RecommendRequest):
     """
     流式推荐接口（SSE）
 
     返回 Server-Sent Events 流，实时推送推理过程
     """
-    request_id = str(uuid.uuid4())
+    request_id = req.thread_id
     start_time = time.time()
 
     logger.info(f"[{request_id}] 开始流式处理请求: {req.question}")
@@ -230,6 +245,23 @@ async def recommend_stream(req: RecommendRequest):
         """SSE 事件生成器"""
         agent = agent_graph.get_agent()
 
+        # 如果有 context，构建初始 conversation_history
+        initial_history = []
+        if req.context:
+            initial_history.append({
+                "round": 1,
+                "user_question": req.context.previous_question,
+                "normalized_question": req.context.previous_normalized_question,
+                "filter_indicators": [
+                    {"alias": f.alias, "value": f.value, "indicator_id": "", "type": ""}
+                    for f in req.context.previous_filter_indicators
+                ],
+                "analysis_dimensions": [
+                    {"search_term": d, "converged": True, "indicators": []}
+                    for d in req.context.previous_dimensions
+                ],
+            })
+
         initial_state = {
             "user_question": req.question,
             "top_k_themes": req.top_k_themes,
@@ -242,6 +274,11 @@ async def recommend_stream(req: RecommendRequest):
             "iteration_round": 0,
             "iteration_log": [],
             "is_low_confidence": False,
+            "low_confidence_message": "",
+            "low_confidence_suggestions": [],
+            "pending_confirmation": None,
+            "user_confirmation": None,
+            "conversation_history": initial_history,
             "candidate_themes": [],
             "recommended_themes": [],
             "recommended_templates": [],
@@ -276,13 +313,34 @@ async def recommend_stream(req: RecommendRequest):
                 if chunk_type == "updates":
                     # 节点状态更新事件
                     updates = chunk.get("data", {})
+
+                    # 检测 interrupt 状态
+                    if "__interrupt__" in updates:
+                        interrupt_data = updates["__interrupt__"]
+                        # LangGraph interrupt 返回的是 Interrupt 对象列表，不是 dict
+                        interrupt_obj = interrupt_data[0] if interrupt_data else None
+                        pending = interrupt_obj.value if interrupt_obj else {}
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "interrupt",
+                                "thread_id": request_id,
+                                "status": "low_confidence" if pending.get("type") == "low_confidence" else "waiting_confirmation",
+                                "pending_confirmation": pending,
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
+                        return  # 停止 SSE 流，等待 /resume
+
                     for node_name, node_state in updates.items():
                         if node_name in node_order:
+                            stage_text = STAGE_COMPLETE_TEXT.get(node_name)
                             yield {
                                 "event": "message",
                                 "data": json.dumps({
                                     "event_type": "stage_complete",
                                     "stage": node_name,
+                                    "markdown": stage_text,
                                     "timestamp": time.time(),
                                 }, ensure_ascii=False),
                             }
@@ -290,14 +348,18 @@ async def recommend_stream(req: RecommendRequest):
 
                 elif chunk_type == "custom":
                     # 自定义事件（来自节点内的 get_stream_writer()）
-                    yield {
-                        "event": "message",
-                        "data": json.dumps({
-                            "event_type": "custom",
-                            "data": chunk.get("data", {}),
-                            "timestamp": time.time(),
-                        }, ensure_ascii=False),
-                    }
+                    raw_data = chunk.get("data", {})
+                    markdown_text = translate_event_to_markdown(raw_data)
+                    if markdown_text:
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "progress",
+                                "markdown": markdown_text,
+                                "raw": raw_data,
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
 
             execution_time_ms = (time.time() - start_time) * 1000
 
@@ -328,6 +390,143 @@ async def recommend_stream(req: RecommendRequest):
 
         except Exception as e:
             logger.exception(f"[{request_id}] 流式处理失败: {e}")
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "event_type": "error",
+                    "message": str(e),
+                    "timestamp": time.time(),
+                }, ensure_ascii=False),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/resume")
+async def resume_stream(req: ResumeRequest):
+    """
+    恢复中断的流式处理（SSE）
+
+    当 wait_for_confirmation 节点触发 interrupt 后，
+    前端确认分析维度，通过此接口恢复执行
+    """
+    request_id = req.thread_id
+    start_time = time.time()
+
+    logger.info(f"[{request_id}] 恢复流式处理请求")
+
+    node_order = [
+        "extract_phrases",
+        "classify_and_iterate",
+        "wait_for_confirmation",
+        "aggregate_themes",
+        "complete_indicators",
+        "judge_themes",
+        "retrieve_templates",
+        "analyze_templates",
+        "format_output",
+    ]
+
+    async def event_generator() -> AsyncIterator[dict]:
+        """SSE 事件生成器"""
+        agent = agent_graph.get_agent()
+        config = {"configurable": {"thread_id": request_id}}
+
+        # 构造 Command，将用户确认结果注入 interrupt
+        resume_command = Command(resume={
+            "confirmed_dimensions": req.confirmed_dimensions,
+            "confirmed_question": req.confirmed_question,
+        })
+
+        try:
+            final_result = None
+            async for chunk in agent.astream(
+                resume_command,
+                config=config,
+                stream_mode=["updates", "custom"],
+                version="v2",
+            ):
+                chunk_type = chunk.get("type", "")
+
+                if chunk_type == "updates":
+                    updates = chunk.get("data", {})
+
+                    # 检测 interrupt 状态
+                    if "__interrupt__" in updates:
+                        interrupt_data = updates["__interrupt__"]
+                        # LangGraph interrupt 返回的是 Interrupt 对象列表，不是 dict
+                        interrupt_obj = interrupt_data[0] if interrupt_data else None
+                        pending = interrupt_obj.value if interrupt_obj else {}
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "interrupt",
+                                "thread_id": request_id,
+                                "status": "low_confidence" if pending.get("type") == "low_confidence" else "waiting_confirmation",
+                                "pending_confirmation": pending,
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
+                        return  # 再次中断，等待下次 /resume
+
+                    for node_name, node_state in updates.items():
+                        if node_name in node_order:
+                            stage_text = STAGE_COMPLETE_TEXT.get(node_name)
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({
+                                    "event_type": "stage_complete",
+                                    "stage": node_name,
+                                    "markdown": stage_text,
+                                    "timestamp": time.time(),
+                                }, ensure_ascii=False),
+                            }
+                            final_result = node_state if node_state else final_result
+
+                elif chunk_type == "custom":
+                    # 自定义事件（来自节点内的 get_stream_writer()）
+                    raw_data = chunk.get("data", {})
+                    markdown_text = translate_event_to_markdown(raw_data)
+                    if markdown_text:
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "progress",
+                                "markdown": markdown_text,
+                                "raw": raw_data,
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
+
+            execution_time_ms = (time.time() - start_time) * 1000
+
+            # v2 streaming 只返回增量更新，从 Checkpointer 获取完整最终状态
+            if final_result is None:
+                try:
+                    checkpointer = get_checkpointer()
+                    checkpoint = checkpointer.get({"configurable": {"thread_id": request_id}})
+                    if checkpoint and checkpoint.get("channel_values"):
+                        final_result = checkpoint["channel_values"]
+                except Exception as e:
+                    logger.warning(f"无法从 Checkpointer 获取最终状态: {e}")
+
+            response = _build_response(
+                final_result.get("final_output", {}) if final_result else {},
+                execution_time_ms,
+                request_id,
+            )
+
+            yield {
+                "event": "message",
+                "data": json.dumps({
+                    "event_type": "final",
+                    "data": response.model_dump(mode="json"),
+                    "timestamp": time.time(),
+                }, ensure_ascii=False),
+            }
+
+        except Exception as e:
+            logger.exception(f"[{request_id}] 恢复流式处理失败: {e}")
             yield {
                 "event": "error",
                 "data": json.dumps({

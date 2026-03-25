@@ -20,6 +20,7 @@ from .nodes import (
     format_output,
     judge_themes,
     retrieve_templates,
+    wait_for_confirmation,
 )
 from .state import AgentState
 
@@ -58,6 +59,7 @@ def build_agent_graph(
     # Stage 0
     workflow.add_node("extract_phrases", extract_phrases)
     workflow.add_node("classify_and_iterate", classify_and_iterate)
+    workflow.add_node("wait_for_confirmation", wait_for_confirmation)
 
     # Stage 1
     workflow.add_node("aggregate_themes", aggregate_themes)
@@ -74,7 +76,8 @@ def build_agent_graph(
     # ── 添加边 ──
     workflow.add_edge(START, "extract_phrases")
     workflow.add_edge("extract_phrases", "classify_and_iterate")
-    workflow.add_edge("classify_and_iterate", "aggregate_themes")
+    workflow.add_edge("classify_and_iterate", "wait_for_confirmation")
+    workflow.add_edge("wait_for_confirmation", "aggregate_themes")
     workflow.add_edge("aggregate_themes", "complete_indicators")
     workflow.add_edge("complete_indicators", "judge_themes")
     workflow.add_edge("judge_themes", "retrieve_templates")

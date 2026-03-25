@@ -42,53 +42,13 @@ def close_neo4j_driver():
 # 主题聚合
 # ─────────────────────────────────────────────
 
-def _get_indicator_theme_internal(indicator_id: str) -> dict | None:
-    """内部方法：获取单个指标的 THEME 信息"""
-    try:
-        with get_neo4j_driver().session() as session:
-            business_labels = [
-                "SECTOR", "CATEGORY", "THEME", "SUBPATH", "INDICATOR",
-                "INSIGHT_TEMPLATE", "COMBINEDQUERY_TEMPLATE",
-            ]
-
-            cypher = """
-            MATCH path = (entry)-[:HAS_CHILD*]->(indicator)
-            WHERE entry.alias = '自主分析' AND indicator.id = $indicator_id
-              AND labels(entry)[0] IN $business_labels
-              AND labels(indicator)[0] IN $business_labels
-            RETURN [node in nodes(path) | {
-                id: node.id,
-                alias: node.alias,
-                type: labels(node)[0],
-                level: node.level
-            }] as path_nodes
-            """
-            result = session.run(
-                cypher, indicator_id=indicator_id, business_labels=business_labels
-            ).single()
-
-            if not result:
-                return None
-
-            for node in result["path_nodes"]:
-                if node["type"] == "THEME":
-                    return {
-                        "indicator_id": indicator_id,
-                        "theme_id": node["id"],
-                        "theme_alias": node["alias"],
-                        "theme_level": node.get("level"),
-                    }
-            return None
-    except Exception as e:
-        logger.warning(f"获取指标 {indicator_id} 的 THEME 信息失败: {e}")
-        return None
-
-
 def aggregate_themes_from_indicators(
     matched_indicators: list[str], top_k: int = 3
 ) -> dict:
     """
     从指标列表中聚合候选主题（按频次排序）
+
+    优化版本：使用单次批量查询替代 N+1 查询
 
     Args:
         matched_indicators: 指标 ID 列表
@@ -127,17 +87,42 @@ def aggregate_themes_from_indicators(
                 "execution_time_ms": round((time.time() - start) * 1000, 2),
             }
 
-        # Python 循环：每个指标调用一次 _get_indicator_theme_internal
-        theme_map: dict = {}
+        # 批量查询：一次性获取所有指标的 THEME 信息
+        business_labels = [
+            "SECTOR", "CATEGORY", "THEME", "SUBPATH", "INDICATOR",
+            "INSIGHT_TEMPLATE", "COMBINEDQUERY_TEMPLATE",
+        ]
 
-        for indicator_id in matched_indicators:
-            result = _get_indicator_theme_internal(indicator_id)
-            if result:
-                theme_id = result["theme_id"]
+        with get_neo4j_driver().session() as session:
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(indicator)
+            WHERE entry.alias = '自主分析'
+              AND indicator.id IN $indicator_ids
+              AND labels(entry)[0] IN $business_labels
+              AND labels(indicator)[0] IN $business_labels
+            WITH indicator.id as indicator_id,
+                 [node in nodes(path) WHERE labels(node)[0] = 'THEME' | node][0] as theme
+            WHERE theme IS NOT NULL
+            RETURN indicator_id, theme.id as theme_id, theme.alias as theme_alias, theme.level as theme_level
+            """
+            result = session.run(
+                cypher,
+                indicator_ids=matched_indicators,
+                business_labels=business_labels
+            )
+
+            # 聚合结果
+            theme_map: dict = {}
+            for row in result:
+                indicator_id = row["indicator_id"]
+                theme_id = row["theme_id"]
+                theme_alias = row["theme_alias"]
+                theme_level = row.get("theme_level")
+
                 if theme_id not in theme_map:
                     theme_map[theme_id] = {
-                        "theme_alias": result["theme_alias"],
-                        "theme_level": result.get("theme_level"),
+                        "theme_alias": theme_alias,
+                        "theme_level": theme_level,
                         "matched_indicator_ids": [],
                     }
                 theme_map[theme_id]["matched_indicator_ids"].append(indicator_id)

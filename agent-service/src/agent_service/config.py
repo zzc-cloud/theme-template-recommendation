@@ -57,7 +57,7 @@ SILICONFLOW_EMBEDDING_URL: str = os.getenv(
 # Embedding 模型（SiliconFlow）
 EMBEDDING_MODEL: str = os.getenv(
     "EMBEDDING_MODEL",
-    "Pro/BAAI/bge-m3",
+    "Qwen/Qwen3-Embedding-8B",
 )
 EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
 

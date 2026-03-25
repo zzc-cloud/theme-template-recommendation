@@ -96,6 +96,25 @@ class IterationRecord(TypedDict):
 
 
 # ─────────────────────────────────────────────
+# 对话历史
+# ─────────────────────────────────────────────
+
+class ConversationRound(TypedDict):
+    """对话轮次记录"""
+    round: int
+    user_question: str
+    normalized_question: str
+    filter_indicators: list
+    analysis_dimensions: list
+
+
+class UserConfirmation(TypedDict):
+    """用户确认结果"""
+    confirmed_dimensions: list[str]
+    confirmed_question: str
+
+
+# ─────────────────────────────────────────────
 # Agent State
 # ─────────────────────────────────────────────
 
@@ -114,6 +133,13 @@ class AgentState(TypedDict):
     iteration_round: int                       # 当前迭代轮次
     iteration_log: list[IterationRecord]      # 迭代日志
     is_low_confidence: bool                    # 是否进入低置信度流程
+
+    # ── 用户交互状态 ──
+    low_confidence_message: str                # 低置信度提示信息
+    low_confidence_suggestions: list           # 低置信度换词建议
+    pending_confirmation: dict | None         # 待用户确认的交互数据
+    user_confirmation: UserConfirmation | None # 用户确认结果
+    conversation_history: list[ConversationRound]  # 对话历史
 
     # ── 阶段 1 产物 ──
     candidate_themes: list[ThemeCandidate]     # 候选主题

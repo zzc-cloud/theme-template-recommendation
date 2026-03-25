@@ -3,7 +3,7 @@ API 数据模型
 Pydantic 请求/响应模型
 """
 
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,20 @@ from pydantic import BaseModel, Field
 # ─────────────────────────────────────────────
 # 请求模型
 # ─────────────────────────────────────────────
+
+class PreviousFilterIndicator(BaseModel):
+    """历史筛选指标"""
+    alias: str
+    value: str
+
+
+class ConversationContext(BaseModel):
+    """对话上下文（用于追问场景）"""
+    previous_question: str = Field(default="")
+    previous_normalized_question: str = Field(default="")
+    previous_filter_indicators: list[PreviousFilterIndicator] = Field(default_factory=list)
+    previous_dimensions: list[str] = Field(default_factory=list)
+
 
 class RecommendRequest(BaseModel):
     """推荐请求"""
@@ -37,6 +51,21 @@ class RecommendRequest(BaseModel):
         default=None,
         description="模板类型过滤：INSIGHT / COMBINEDQUERY / None（全部）",
     )
+    thread_id: str = Field(
+        ...,
+        description="请求唯一标识（用于断点续传和会话恢复）",
+    )
+    context: Optional[ConversationContext] = Field(
+        default=None,
+        description="对话上下文（追问场景使用）",
+    )
+
+
+class ResumeRequest(BaseModel):
+    """恢复请求"""
+    thread_id: str = Field(..., description="线程 ID")
+    confirmed_dimensions: list[str] = Field(..., description="用户确认的分析维度列表")
+    confirmed_question: str = Field(default="", description="用户确认的规范化问题")
 
 
 # ─────────────────────────────────────────────
@@ -128,19 +157,9 @@ class RecommendResponse(BaseModel):
     recommended_templates: list[RecommendedTemplateResponse] = Field(default_factory=list)
     execution_time_ms: float
     iteration_rounds: int = 0
+    conversation_round: int = Field(default=1, description="当前对话轮次")
     error: Optional[str] = None
-
-
-# ─────────────────────────────────────────────
-# 流式事件模型
-# ─────────────────────────────────────────────
-
-class StreamEvent(BaseModel):
-    """流式事件"""
-    event_type: str = Field(description="事件类型: stage_start / stage_complete / error / final")
-    stage: Optional[str] = Field(default=None, description="阶段名称")
-    data: Optional[dict] = Field(default=None, description="事件数据")
-    timestamp: float = Field(description="事件时间戳")
+    markdown: str = Field(default="", description="Markdown 格式的人类可读输出")
 
 
 # ─────────────────────────────────────────────

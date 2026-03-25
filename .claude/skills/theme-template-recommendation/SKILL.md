@@ -689,7 +689,6 @@ get_theme_templates_with_coverage(
 | 1.1 主题统计聚合 | `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序） |
 | 1.2 全量指标补全 | `get_theme_filter_indicators` | 获取主题下全量筛选指标 |
 | 1.2 全量指标补全 | `get_theme_analysis_indicators` | 获取主题下全量分析指标 |
-| 1.2 指标完整业务路径获取 | `get_indicator_full_path` | 获取分析指标完整业务路径 |
 
 ### 阶段 2（模板推荐）
 

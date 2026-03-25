@@ -44,8 +44,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                       FastAPI (REST API)                           │
-│  POST /api/v1/recommend       — 同步推荐                          │
-│  POST /api/v1/recommend/stream — SSE 流式推荐                      │
+│  POST /api/v1/recommend — SSE 流式推荐                             │
 └──────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -94,7 +93,7 @@ agent-service/
 │       ├── config.py             # 配置管理（.env 加载）
 │       ├── api/
 │       │   ├── __init__.py
-│       │   ├── routes.py         # API 路由（同步 + 流式）
+│       │   ├── routes.py         # API 路由（SSE 流式）
 │       │   └── schemas.py         # Pydantic 请求/响应模型
 │       ├── graph/
 │       │   ├── __init__.py
@@ -167,13 +166,8 @@ python -m agent_service.main
 # 健康检查
 curl http://localhost:8000/health
 
-# 测试推荐接口
-curl -X POST http://localhost:8000/api/v1/recommend \
-  -H "Content-Type: application/json" \
-  -d '{"question": "我想分析南京分行的小微企业贷款风险"}'
-
-# 测试流式接口
-curl -s -N -X POST http://localhost:8000/api/v1/recommend/stream \
+# 测试流式推荐接口
+curl -s -N -X POST http://localhost:8000/api/v1/recommend \
   -H "Content-Type: application/json" \
   -d '{"question": "我想分析南京分行的小微企业贷款风险"}'
 ```
@@ -193,7 +187,7 @@ GET /health
 
 返回服务状态及依赖服务（Neo4j）连接状态。
 
-### 同步推荐
+### 流式推荐
 
 ```
 POST /api/v1/recommend
@@ -216,43 +210,6 @@ POST /api/v1/recommend
 | `top_k_themes` | int | 3 | 返回的主题数量上限 |
 | `top_k_templates` | int | 5 | 每种类型返回的模板数量上限 |
 | `template_type` | string | null | 模板类型过滤：INSIGHT / COMBINEDQUERY / null（全部） |
-
-**响应体**
-
-```json
-{
-  "request_id": "uuid",
-  "normalized_question": "分析南京分行的小微企业贷款风险",
-  "filter_indicators": [...],
-  "analysis_dimensions": [...],
-  "is_low_confidence": false,
-  "recommended_themes": [
-    {
-      "theme_id": "THEME.xxx",
-      "theme_alias": "对公贷款借据",
-      "is_supported": true,
-      "selected_filter_indicators": [...],
-      "selected_analysis_indicators": [...]
-    }
-  ],
-  "recommended_templates": [
-    {
-      "template_id": "TEMPLATE.xxx",
-      "template_alias": "贷款风险透视",
-      "coverage_ratio": 0.85,
-      "usability": {...}
-    }
-  ],
-  "execution_time_ms": 5230.5,
-  "iteration_rounds": 2
-}
-```
-
-### 流式推荐
-
-```
-POST /api/v1/recommend/stream
-```
 
 返回 SSE 流，包含以下事件：
 
@@ -342,6 +299,7 @@ data: {"event_type": "final", "data": {...}, "timestamp": 1710000005.0}
 
 | 文档 | 说明 |
 |------|------|
+| [API 对接文档](docs/API.md) | 完整 API 对接指南（SSE 事件、请求/响应示例、前端集成） |
 | [DEPLOY.md](DEPLOY.md) | 完整部署指南（Docker、生产环境） |
 | [LangGraph 文档](https://langchain-ai.github.io/langgraph/) | LangGraph 官方文档 |
 | [LangChain 文档](https://python.langchain.com/docs) | LangChain 官方文档 |
