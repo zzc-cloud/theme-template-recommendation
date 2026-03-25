@@ -58,22 +58,43 @@ pip install -r requirements.txt
    ✅ 对公贷款逾期统计 (覆盖率 80%)
 ```
 
+## 数据来源
+
+本项目依赖两个数据源：
+
+| 数据源 | 用途 | 说明 |
+|--------|------|------|
+| **Chroma** | 向量语义搜索 | 存储魔数师指标的向量化数据，用于语义匹配 |
+| **Neo4j** | 本体关系存储 | 存储 THEME、TEMPLATE、INDICATOR、TERM 的关系图 |
+
 ## MCP 工具
 
-### theme-ontology（Neo4j - 8 个工具）
+### 数据源对应关系
+
+| 阶段 | 工具 | 数据来源 | 功能 |
+|------|------|----------|------|
+| **阶段 0** | `search_indicators_by_vector` | **Chroma** | 向量化语义搜索魔数师指标 |
+| **阶段 1** | `aggregate_themes_from_indicators` | **Neo4j** | 从指标列表聚合候选主题（按频次排序） |
+| **阶段 1** | `get_theme_filter_indicators` | **Neo4j** | 获取主题下全量筛选指标（时间+机构） |
+| **阶段 1** | `get_theme_analysis_indicators` | **Neo4j** | 获取主题下全量分析指标 |
+| **阶段 2** | `get_theme_templates_with_coverage` | **Neo4j** | 获取主题模板 + 覆盖率计算 |
+| **阶段 2** | `get_template_indicators` | **Neo4j** | 获取模板包含的所有指标 |
+
+### theme-vector（Chroma）
+
+- `search_indicators_by_vector` - 向量化语义搜索魔数师指标
+
+### theme-ontology（Neo4j）
+
 - `aggregate_themes_from_indicators` - 从指标列表聚合候选主题（按频次排序）
+- `get_theme_full_path` - 获取主题从"自主分析"到该主题的完整路径
 - `get_theme_filter_indicators` - 获取主题下全量筛选指标（时间+机构）
 - `get_theme_analysis_indicators` - 获取主题下全量分析指标
+- `get_indicator_field_mapping` - 指标字段映射（语义增强）
+- `get_table_terms` - 表字段术语描述（语义增强）
 - `get_indicator_full_path` - 指标完整路径
-- `get_indicator_field_mapping` - 指标字段映射
-- `get_table_terms` - 表字段术语描述
 - `get_theme_templates_with_coverage` - 主题模板+覆盖率
 - `get_template_indicators` - 模板包含的指标
-
-### theme-resources（MySQL - 3 个工具）
-- `find_indicators_by_table` - 表→关联指标
-- `get_indicator_field_mapping_mysql` - 指标→字段映射
-- `get_table_columns_bigmeta` - 表字段详情
 
 ## 项目来源
 

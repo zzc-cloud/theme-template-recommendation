@@ -32,11 +32,12 @@
 |------|------|------|
 | `search_indicators_by_vector` | **向量化语义搜索魔数师指标** | 0 |
 
-### theme-ontology（Neo4j - 8 个工具）
+### theme-ontology（Neo4j - 9 个工具）
 
 | 工具 | 功能 | 阶段 |
 |------|------|------|
-| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序） | 1 |
+| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序，含完整路径） | 1 |
+| `get_theme_full_path` | 获取主题从"自主分析"到该主题的完整路径 | 1 |
 | `get_theme_filter_indicators` | 获取主题下全量筛选指标（时间+机构） | 1 |
 | `get_theme_analysis_indicators` | 获取主题下全量分析指标 | 1 |
 | `get_indicator_field_mapping` | 【语义增强】指标字段映射 | 1 |
@@ -44,14 +45,6 @@
 | `get_indicator_full_path` | 指标完整路径（含 THEME） | 1 |
 | `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 2 |
 | `get_template_indicators` | 模板包含的指标 | 2 |
-
-### theme-resources（MySQL - 3 个工具）
-
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `find_indicators_by_table` | 表→关联指标 | 0 |
-| `get_indicator_field_mapping_mysql` | 指标→字段映射（MySQL） | 1 |
-| `get_table_columns_bigmeta` | 表字段详情 | 1 |
 
 ### Chrome MCP（浏览器自动化）
 
@@ -134,13 +127,12 @@
 
 ---
 
-## 数据库依赖
+## 数据源依赖
 
-本项目依赖三个数据源：
+本项目依赖两个数据源：
 
 1. **Chroma**：存储魔数师指标的向量化数据（用于语义搜索）
 2. **Neo4j**：存储魔数师指标层（THEME、TEMPLATE、INDICATOR、TERM）
-3. **MySQL**：存储指标-字段映射关系
 
 配置文件位于 `mcp-server/.env`。
 
