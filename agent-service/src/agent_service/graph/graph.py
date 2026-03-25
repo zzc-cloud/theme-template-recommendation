@@ -8,8 +8,9 @@ LangGraph 图构建
 import logging
 from typing import Optional
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+
+from ..utils.ttl_memory_saver import TTLMemorySaver
 
 from .nodes import (
     aggregate_themes,
@@ -27,25 +28,25 @@ from .state import AgentState
 logger = logging.getLogger(__name__)
 
 # ── 全局 Checkpointer ──
-_checkpointer: Optional[InMemorySaver] = None
+_checkpointer: Optional[TTLMemorySaver] = None
 
 
-def get_checkpointer() -> InMemorySaver:
+def get_checkpointer() -> TTLMemorySaver:
     """获取 Checkpointer（单例，进程内共享）"""
     global _checkpointer
     if _checkpointer is None:
-        _checkpointer = InMemorySaver()
+        _checkpointer = TTLMemorySaver(ttl_seconds=86400)  # TTL = 1天
     return _checkpointer
 
 
 def build_agent_graph(
-    checkpointer: Optional[InMemorySaver] = None,
+    checkpointer: Optional[TTLMemorySaver] = None,
 ) -> StateGraph:
     """
     构建主题模板推荐 Agent 的 LangGraph
 
     Args:
-        checkpointer: 状态持久化器，默认使用 InMemorySaver
+        checkpointer: 状态持久化器，默认使用 TTLMemorySaver
 
     流程：
     Stage 0: extract_phrases → classify_and_iterate

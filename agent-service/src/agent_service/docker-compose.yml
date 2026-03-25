@@ -19,7 +19,7 @@ services:
       # SiliconFlow API
       - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
       # LLM 模型
-      - LLM_MODEL=${LLM_MODEL:-/}
+      - LLM_MODEL=${LLM_MODEL}
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
       # 向量库

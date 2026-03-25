@@ -414,9 +414,9 @@ def get_theme_analysis_indicators(theme_id: str) -> str:
 
 
 def _get_indicator_theme_internal(indicator_id: str) -> dict:
-    """内部方法：获取单个指标的 THEME 信息
+    """内部方法：获取单个指标的 THEME 信息及完整路径
 
-    从业务路径中提取 type=THEME 的节点。
+    从业务路径中提取 type=THEME 的节点，并构建从"自主分析"到该主题的完整路径。
     """
     try:
         with get_driver().session() as session:
@@ -440,18 +440,134 @@ def _get_indicator_theme_internal(indicator_id: str) -> dict:
             if not result:
                 return None
 
-            # 从路径节点中提取 THEME 类型的节点
-            for node in result["path_nodes"]:
-                if node["type"] == "THEME":
-                    return {
+            # 从路径节点中提取 THEME 类型的节点，同时构建完整路径
+            path_nodes = result["path_nodes"]
+            theme_info = None
+            path_aliases = []
+
+            for node in path_nodes:
+                node_type = node["type"]
+                node_alias = node["alias"]
+
+                # 收集路径上的别名（排除 INDICATOR 类型）
+                if node_type != "INDICATOR":
+                    path_aliases.append(node_alias)
+
+                # 提取 THEME 节点信息
+                if node_type == "THEME":
+                    theme_info = {
                         "indicator_id": indicator_id,
                         "theme_id": node["id"],
                         "theme_alias": node["alias"],
                         "theme_level": node.get("level"),
                     }
-            return None
+
+            if theme_info:
+                # 构建完整路径字符串（从"自主分析"到 THEME）
+                # 路径格式：自主分析 > 板块 > 类别 > ... > 主题
+                theme_idx = None
+                for i, node in enumerate(path_nodes):
+                    if node["type"] == "THEME" and node["id"] == theme_info["theme_id"]:
+                        theme_idx = i
+                        break
+
+                if theme_idx is not None:
+                    # 截取从"自主分析"到 THEME 的路径
+                    theme_path_aliases = []
+                    for i, node in enumerate(path_nodes[:theme_idx + 1]):
+                        if node["type"] != "INDICATOR":
+                            theme_path_aliases.append(node["alias"])
+                    theme_info["theme_path"] = " > ".join(theme_path_aliases)
+                else:
+                    theme_info["theme_path"] = f"自主分析 > {theme_info['theme_alias']}"
+
+            return theme_info
     except Exception:
         return None
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_theme_full_path(theme_id: str) -> str:
+    """获取主题从"自主分析"到该主题的完整路径
+
+    用于在推荐主题时展示完整路径，方便用户在魔数师平台中快速定位主题。
+
+    Args:
+        theme_id: THEME 节点 ID
+
+    Returns:
+        {
+            "success": true,
+            "theme_id": "THEME.xxx",
+            "theme_alias": "对公贷款借据",
+            "theme_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据",
+            "path_nodes": [
+                {"alias": "自主分析", "type": "SECTOR"},
+                {"alias": "资产板块", "type": "CATEGORY"},
+                {"alias": "对公贷款", "type": "SUBPATH"},
+                {"alias": "对公贷款借据", "type": "THEME"}
+            ],
+            "execution_time_ms": 45.2
+        }
+    """
+    start = time.time()
+    try:
+        with get_driver().session() as session:
+            business_labels = ['SECTOR', 'CATEGORY', 'THEME', 'SUBPATH']
+
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(theme:THEME {id: $theme_id})
+            WHERE entry.alias = '自主分析'
+              AND labels(entry)[0] IN $business_labels
+            RETURN [node in nodes(path) | {
+                id: node.id,
+                alias: node.alias,
+                type: labels(node)[0],
+                level: node.level
+            }] as path_nodes
+            """
+            result = session.run(cypher, theme_id=theme_id, business_labels=business_labels).single()
+
+            if not result or not result.get("path_nodes"):
+                return json.dumps({
+                    "success": False,
+                    "error": f"未找到主题 {theme_id} 的路径信息",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+
+            path_nodes = result["path_nodes"]
+
+            # 提取 THEME 节点信息
+            theme_alias = None
+            for node in path_nodes:
+                if node["type"] == "THEME":
+                    theme_alias = node["alias"]
+                    break
+
+            # 构建完整路径
+            path_aliases = [node["alias"] for node in path_nodes]
+            theme_path = " > ".join(path_aliases)
+
+            # 构建路径节点列表（用于展示）
+            path_node_list = [
+                {
+                    "alias": node["alias"],
+                    "type": node["type"]
+                }
+                for node in path_nodes
+            ]
+
+            return json.dumps({
+                "success": True,
+                "theme_id": theme_id,
+                "theme_alias": theme_alias,
+                "theme_path": theme_path,
+                "path_nodes": path_node_list,
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -475,6 +591,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
                     "theme_id": "THEME.xxx",
                     "theme_alias": "对公贷款借据",
                     "theme_level": 5,
+                    "theme_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据",
                     "frequency": 15,
                     "matched_indicator_ids": ["INDICATOR.xxx", "..."]
                 }
@@ -500,7 +617,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
             }, ensure_ascii=False)
 
         # Python 循环：每个指标调用一次 _get_indicator_theme_internal
-        theme_map: dict = {}  # theme_id -> {theme_alias, theme_level, matched_indicator_ids}
+        theme_map: dict = {}  # theme_id -> {theme_alias, theme_level, theme_path, matched_indicator_ids}
 
         for indicator_id in matched_indicators:
             result = _get_indicator_theme_internal(indicator_id)
@@ -510,6 +627,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
                     theme_map[theme_id] = {
                         "theme_alias": result["theme_alias"],
                         "theme_level": result.get("theme_level"),
+                        "theme_path": result.get("theme_path", f"自主分析 > {result['theme_alias']}"),
                         "matched_indicator_ids": []
                     }
                 theme_map[theme_id]["matched_indicator_ids"].append(indicator_id)
@@ -528,6 +646,7 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
                 "theme_id": theme_id,
                 "theme_alias": info["theme_alias"],
                 "theme_level": info.get("theme_level") or 0,
+                "theme_path": info.get("theme_path", f"自主分析 > {info['theme_alias']}"),
                 "frequency": len(matched_ids),
                 "matched_indicator_ids": matched_ids
             })

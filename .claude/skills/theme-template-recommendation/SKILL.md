@@ -294,12 +294,17 @@ normalized_question:  规范化问题描述（来自 0.3 收敛时输出）
     {
       "theme_id": "THEME.xxx",
       "theme_alias": "个人存款",
+      "theme_level": 4,
+      "theme_path": "自主分析 > 负债板块 > 个人存款 > 个人存款",
       "frequency": 5,
       "matched_indicator_ids": ["INDICATOR.xxx", ...]
     }
   ]
 }
 ```
+
+> **注意**：`aggregate_themes_from_indicators` 返回结果中已包含 `theme_path` 字段，
+> 该字段为从"自主分析"到该主题的完整路径，方便用户在魔数师平台中快速定位主题。
 
 #### 1.2 指标补全
 

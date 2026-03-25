@@ -51,6 +51,7 @@ class ThemeCandidate(TypedDict):
     theme_id: str
     theme_alias: str
     theme_level: int
+    theme_path: str
     frequency: int
     matched_indicator_ids: list[str]
 
@@ -60,6 +61,7 @@ class RecommendedTheme(TypedDict):
     theme_id: str
     theme_alias: str
     theme_level: int
+    theme_path: str
     is_supported: bool
     support_reason: str
     selected_filter_indicators: list[SelectedIndicator]

@@ -111,6 +111,7 @@ class RecommendedThemeResponse(BaseModel):
     theme_id: str
     theme_alias: str
     theme_level: int
+    theme_path: str = ""
     is_supported: bool
     support_reason: str = ""
     selected_filter_indicators: list[SelectedIndicatorResponse] = Field(default_factory=list)
@@ -128,8 +129,8 @@ class MissingIndicatorAnalysisResponse(BaseModel):
 class TemplateUsabilityResponse(BaseModel):
     """模板可用性"""
     template_id: str = ""
-    overall_usability: str  # 可直接使用 / 补充后可用 / 缺口较大建议谨慎
-    usability_summary: str
+    overall_usability: str = ""  # 可直接使用 / 补充后可用 / 缺口较大建议谨慎
+    usability_summary: str = ""
     missing_indicator_analysis: list[MissingIndicatorAnalysisResponse] = Field(default_factory=list)
 
 
@@ -173,4 +174,8 @@ class HealthResponse(BaseModel):
     services: dict[str, bool] = Field(
         default_factory=dict,
         description="各服务状态",
+    )
+    concurrency: dict[str, int] = Field(
+        default_factory=dict,
+        description="并发状态：current/max/available",
     )

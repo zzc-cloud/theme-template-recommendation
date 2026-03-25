@@ -81,16 +81,17 @@ cd agent-service
 
 # 创建 .env 文件
 cat > .env << 'EOF'
-# Neo4j（使用 docker-compose 内置的 Neo4j）
+# Neo4j（默认连接宿主机上的 Neo4j，bolt://host.docker.internal:7687）
+# 如需独立容器，请自行取消 docker-compose.yml 中 neo4j 服务的注释
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_secure_password_here
 
 # SiliconFlow API（必需）
 SILICONFLOW_API_KEY=sk-your-api-key-here
 
-# LLM 模型
-LLM_MODEL=Pro/zai-org/
-LLM_TEMPERATURE=0.1
+# LLM 模型（⚠️ 必填，不可依赖默认值）
+LLM_MODEL=Pro/zai-org/GLM-5
+LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
 
 # Chroma 向量库路径（如需挂载本地数据）
@@ -118,9 +119,9 @@ docker-compose logs -f agent-service
 curl http://localhost:8000/health
 
 # 测试推荐
-curl -X POST http://localhost:8000/api/v1/recommend \
+curl -s -N -X POST http://localhost:8000/api/v1/recommend \
   -H "Content-Type: application/json" \
-  -d '{"question": "我想分析南京分行的小微企业贷款风险"}'
+  -d "{\"thread_id\": \"test-$(date +%s)\", \"question\": \"我想分析南京分行的小微企业贷款风险\"}"
 ```
 
 #### 4. 停止服务
@@ -170,16 +171,18 @@ NEO4J_PASSWORD=your_neo4j_password
 # SiliconFlow API（必需）
 SILICONFLOW_API_KEY=sk-your-api-key-here
 
-# LLM 模型
-LLM_MODEL=Pro/zai-org/
-LLM_TEMPERATURE=0.1
+# LLM 模型（⚠️ 必填，不可依赖默认值）
+LLM_MODEL=Pro/zai-org/GLM-5
+LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
 
-# Embedding
-EMBEDDING_MODEL=Pro/BAAI/bge-m3
+# Embedding（可选，使用 SiliconFlow 内置）
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
 EMBEDDING_DIM=1024
 
 # Chroma 向量库路径
+# 本地开发：代码自动推断为 mcp-server/data/indicators_vector（可省略此行）
+# 容器部署：通过 -v 挂载到此路径
 CHROMA_PATH=/app/chroma
 
 # Agent 行为参数
@@ -315,6 +318,7 @@ server {
     listen 80;
     server_name your-domain.com;
 
+    # ── 通用代理配置（适用于所有接口） ──
     location / {
         proxy_pass http://agent_backend;
         proxy_http_version 1.1;
@@ -330,17 +334,26 @@ server {
         proxy_send_timeout 300s;
     }
 
-    location /api/v1/recommend/stream {
+    # ── SSE 接口（/recommend + /resume） ──
+    # ⚠️ 注意：健康检查 /health 不在 /api/v1 前缀下
+    location ~ ^/api/v1/(recommend|resume)$ {
         proxy_pass http://agent_backend;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 600s;
+        proxy_read_timeout 300s;
         proxy_connect_timeout 75s;
+        proxy_send_timeout 300s;
 
-        # SSE 必需配置
+        # SSE 必需：禁用 Nginx 缓冲
         proxy_set_header X-Accel-Buffering no;
+
+        # 标准代理头
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -361,7 +374,7 @@ sudo apt install -y supervisor
 # 创建配置
 sudo tee /etc/supervisor/conf.d/agent-service.conf << 'EOF'
 [program:agent-service]
-command=/opt/agent-service/venv/bin/uvicorn agent_service.main:app --host 0.0.0.0 --port 8000 --workers 4
+command=/opt/agent-service/venv/bin/uvicorn agent_service.main:app --host 0.0.0.0 --port 8000 --workers 1
 directory=/opt/agent-service
 user=root
 autostart=true
@@ -397,17 +410,30 @@ NEO4J_PASSWORD=<生产密码>
 # SiliconFlow（必需）
 SILICONFLOW_API_KEY=sk-<your-production-key>
 
-# LLM（生产可根据需要调整参数）
-LLM_MODEL=Pro/zai-org/
-LLM_TEMPERATURE=0.1
+# LLM（⚠️ 必填，不可依赖默认值）
+LLM_MODEL=Pro/zai-org/GLM-5
+LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
 
 # 向量库
+# 容器部署时：挂载向量库数据到此路径
 CHROMA_PATH=/app/chroma
 
 # Agent 参数
 MAX_ITERATION_ROUNDS=3
 VECTOR_SEARCH_TOP_K=20
+```
+
+### 健康检查端点
+
+> **注意**：健康检查端点挂载在根路径 `/health`，**不在** `/api/v1` 前缀下。
+
+```bash
+# 正确
+curl http://localhost:8000/health
+
+# 错误（该路径不存在）
+curl http://localhost:8000/api/v1/health
 ```
 
 ### 安全建议
@@ -421,17 +447,30 @@ VECTOR_SEARCH_TOP_K=20
 | 日志 | 配置日志轮转，避免磁盘占满 |
 | 监控 | 接入 Prometheus + Grafana 监控 |
 
+### 状态持久化说明（重要）
+
+> 当前服务使用 `InMemorySaver` 作为 LangGraph Checkpointer，具有以下生产环境限制：
+
+| 限制 | 影响 | 建议 |
+|------|------|------|
+| 进程内存储，服务重启即失效 | 重启后所有进行中的会话（interrupt 状态）丢失 | 维护窗口前通知用户 |
+| 不支持多实例共享 | 多 worker 时同一 thread_id 可能路由到不同实例 | **生产环境必须使用单 worker 或粘性会话** |
+| 内存随会话数增长 | 长期运行可能 OOM | 定期重启或限制并发会话数 |
+
+**生产部署要求**：
+- **必须**使用单实例部署（`--workers 1`）
+- 或配置 Nginx 粘性会话（`ip_hash`）确保同一 session 路由到同一实例
+- 如需多实例，需将 `InMemorySaver` 替换为 `AsyncRedisSaver`（需修改代码）
+
 ### 性能调优
 
 ```bash
-# Uvicorn workers 数量建议
-# = 2 * CPU核心数 + 1
-# 例如：4 核 CPU → workers = 9
+# ⚠️ 由于使用 InMemorySaver，必须使用单 worker
+# 如需多实例，需先将 Checkpointer 替换为 Redis 实现
+uvicorn agent_service.main:app --workers 1 --host 0.0.0.0 --port 8000
 
-uvicorn agent_service.main:app --workers 9 --host 0.0.0.0 --port 8000
-
-# 如果使用 Docker
-docker run ... --env UVICORN_WORKERS=9 theme-template-agent:latest
+# 如果使用 Docker（不支持多 worker）
+docker run ... theme-template-agent:latest
 ```
 
 ### 资源规划
@@ -468,9 +507,9 @@ sudo tail -f /var/log/supervisor/agent-service.log
 
 # ── 健康检查 ──
 curl http://localhost:8000/health
-curl -X POST http://localhost:8000/api/v1/recommend \
+curl -s -N -X POST http://localhost:8000/api/v1/recommend \
   -H "Content-Type: application/json" \
-  -d '{"question": "健康检查测试"}'
+  -d "{\"thread_id\": \"health-check-$(date +%s)\", \"question\": \"健康检查测试\"}"
 ```
 
 ### 日志管理
@@ -571,8 +610,9 @@ curl -H "Authorization: Bearer ${SILICONFLOW_API_KEY}" \
 **优化建议**：
 - 减少 `MAX_ITERATION_ROUNDS`（默认 3）
 - 减少 `VECTOR_SEARCH_TOP_K`（默认 20）
-- 增加 uvicorn workers 数量
-- 检查 Neo4j 是否有适当索引
+- 检查 Neo4j 是否有适当索引（为 theme_id、indicator_id 建立索引）
+- 优化 Chroma 向量库（确保数据已持久化到磁盘，避免每次重建）
+- 如需提升并发，需先将 Checkpointer 替换为 Redis 实现后再考虑多实例部署
 
 ### Q5: Docker 容器启动失败
 
@@ -587,6 +627,27 @@ netstat -tlnp | grep 8000
 # 检查磁盘空间
 df -h
 ```
+
+### Q6: /resume 返回"找不到会话"
+
+**原因**：服务在 /recommend 和 /resume 之间重启，InMemorySaver 数据丢失
+
+**排查**：
+```bash
+# 检查服务是否在两次请求之间重启过
+docker logs --since 10m theme-template-agent | grep "服务启动"
+```
+
+**解决**：引导用户重新提交问题（使用新的 thread_id 调用 /recommend）
+
+### Q7: 多实例部署时 /resume 随机失败
+
+**原因**：InMemorySaver 不支持多实例共享，/resume 请求路由到了不同实例
+
+**解决**：
+1. 改为单实例部署（`--workers 1`）
+2. 或配置 Nginx ip_hash 粘性会话
+3. 或将 Checkpointer 替换为 Redis 实现（需修改代码）
 
 ---
 

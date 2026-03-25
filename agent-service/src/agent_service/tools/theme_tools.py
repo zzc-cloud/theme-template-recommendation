@@ -62,6 +62,7 @@ def aggregate_themes_from_indicators(
                     "theme_id": "THEME.xxx",
                     "theme_alias": "对公贷款借据",
                     "theme_level": 5,
+                    "theme_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据",
                     "frequency": 15,
                     "matched_indicator_ids": ["INDICATOR.xxx", "..."]
                 }
@@ -87,23 +88,38 @@ def aggregate_themes_from_indicators(
                 "execution_time_ms": round((time.time() - start) * 1000, 2),
             }
 
-        # 批量查询：一次性获取所有指标的 THEME 信息
+        # 批量查询：一次性获取所有指标的 THEME 信息及路径
         business_labels = [
             "SECTOR", "CATEGORY", "THEME", "SUBPATH", "INDICATOR",
             "INSIGHT_TEMPLATE", "COMBINEDQUERY_TEMPLATE",
         ]
 
         with get_neo4j_driver().session() as session:
+            # 查询完整路径信息，用于构建 theme_path
             cypher = """
             MATCH path = (entry)-[:HAS_CHILD*]->(indicator)
             WHERE entry.alias = '自主分析'
               AND indicator.id IN $indicator_ids
               AND labels(entry)[0] IN $business_labels
               AND labels(indicator)[0] IN $business_labels
-            WITH indicator.id as indicator_id,
-                 [node in nodes(path) WHERE labels(node)[0] = 'THEME' | node][0] as theme
-            WHERE theme IS NOT NULL
-            RETURN indicator_id, theme.id as theme_id, theme.alias as theme_alias, theme.level as theme_level
+            WITH indicator.id as indicator_id, nodes(path) as path_nodes
+            UNWIND path_nodes as node
+            WITH indicator_id, path_nodes, node
+            WHERE labels(node)[0] = 'THEME'
+            // 找到 THEME 节点在路径中的索引
+            WITH indicator_id,
+                 [i IN range(0, size(path_nodes)-1) WHERE labels(path_nodes[i])[0] = 'THEME' | i][0] as theme_idx,
+                 path_nodes
+            WHERE theme_idx IS NOT NULL
+            // 收集从"自主分析"到 THEME 的路径别名（排除 INDICATOR 类型）
+            WITH indicator_id,
+                 [i IN range(0, theme_idx) WHERE labels(path_nodes[i])[0] <> 'INDICATOR' | path_nodes[i].alias] as path_aliases,
+                 path_nodes[theme_idx] as theme
+            RETURN indicator_id,
+                   theme.id as theme_id,
+                   theme.alias as theme_alias,
+                   theme.level as theme_level,
+                   " > ".join(path_aliases) as theme_path
             """
             result = session.run(
                 cypher,
@@ -118,11 +134,13 @@ def aggregate_themes_from_indicators(
                 theme_id = row["theme_id"]
                 theme_alias = row["theme_alias"]
                 theme_level = row.get("theme_level")
+                theme_path = row.get("theme_path") or f"自主分析 > {theme_alias}"
 
                 if theme_id not in theme_map:
                     theme_map[theme_id] = {
                         "theme_alias": theme_alias,
                         "theme_level": theme_level,
+                        "theme_path": theme_path,
                         "matched_indicator_ids": [],
                     }
                 theme_map[theme_id]["matched_indicator_ids"].append(indicator_id)
@@ -141,6 +159,7 @@ def aggregate_themes_from_indicators(
                 "theme_id": theme_id,
                 "theme_alias": info["theme_alias"],
                 "theme_level": info.get("theme_level") or 0,
+                "theme_path": info.get("theme_path", f"自主分析 > {info['theme_alias']}"),
                 "frequency": len(matched_ids),
                 "matched_indicator_ids": matched_ids,
             })
@@ -155,6 +174,95 @@ def aggregate_themes_from_indicators(
 
     except Exception as e:
         logger.exception(f"主题聚合失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def get_theme_full_path(theme_id: str) -> dict:
+    """
+    获取主题从"自主分析"到该主题的完整路径
+
+    用于在推荐主题时展示完整路径，方便用户在魔数师平台中快速定位主题。
+
+    Args:
+        theme_id: THEME 节点 ID
+
+    Returns:
+        {
+            "success": true,
+            "theme_id": "THEME.xxx",
+            "theme_alias": "对公贷款借据",
+            "theme_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据",
+            "path_nodes": [
+                {"alias": "自主分析", "type": "SECTOR"},
+                {"alias": "资产板块", "type": "CATEGORY"},
+                {"alias": "对公贷款", "type": "SUBPATH"},
+                {"alias": "对公贷款借据", "type": "THEME"}
+            ],
+            "execution_time_ms": 45.2
+        }
+    """
+    import time
+    start = time.time()
+
+    try:
+        with get_neo4j_driver().session() as session:
+            business_labels = ["SECTOR", "CATEGORY", "THEME", "SUBPATH"]
+
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(theme:THEME {id: $theme_id})
+            WHERE entry.alias = '自主分析'
+              AND labels(entry)[0] IN $business_labels
+            RETURN [node in nodes(path) | {
+                id: node.id,
+                alias: node.alias,
+                type: labels(node)[0],
+                level: node.level
+            }] as path_nodes
+            """
+            result = session.run(
+                cypher, theme_id=theme_id, business_labels=business_labels
+            ).single()
+
+            if not result or not result.get("path_nodes"):
+                return {
+                    "success": False,
+                    "error": f"未找到主题 {theme_id} 的路径信息",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2),
+                }
+
+            path_nodes = result["path_nodes"]
+
+            # 提取 THEME 节点信息
+            theme_alias = None
+            for node in path_nodes:
+                if node["type"] == "THEME":
+                    theme_alias = node["alias"]
+                    break
+
+            # 构建完整路径
+            path_aliases = [node["alias"] for node in path_nodes]
+            theme_path = " > ".join(path_aliases)
+
+            # 构建路径节点列表（用于展示）
+            path_node_list = [
+                {
+                    "alias": node["alias"],
+                    "type": node["type"],
+                }
+                for node in path_nodes
+            ]
+
+            return {
+                "success": True,
+                "theme_id": theme_id,
+                "theme_alias": theme_alias,
+                "theme_path": theme_path,
+                "path_nodes": path_node_list,
+                "execution_time_ms": round((time.time() - start) * 1000, 2),
+            }
+
+    except Exception as e:
+        logger.exception(f"获取主题路径失败: {e}")
         return {"success": False, "error": str(e)}
 
 

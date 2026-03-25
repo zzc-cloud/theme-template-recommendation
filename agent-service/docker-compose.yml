@@ -20,8 +20,8 @@ services:
       # SiliconFlow API
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
       # LLM 配置
-      LLM_MODEL: ${LLM_MODEL:-Pro/zai-org/}
-      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.1}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4096}
       # 向量库路径（挂载本地 Chroma 数据）
       CHROMA_PATH: /app/chroma

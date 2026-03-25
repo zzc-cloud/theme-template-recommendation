@@ -2,17 +2,19 @@
 API 路由
 """
 
+import asyncio
 import json
 import logging
 import time
 from typing import AsyncIterator
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from langgraph.types import Command
 from sse_starlette.sse import EventSourceResponse
 
 from ..graph import graph as agent_graph
 from ..graph.graph import get_checkpointer
+from ..config import MAX_CONCURRENT_REQUESTS, CONCURRENT_TIMEOUT_SECONDS
 from .schemas import (
     ConversationContext,
     FilterIndicatorResponse,
@@ -29,6 +31,32 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["recommend"])
+
+
+# ═════════════════════════════════════════════════════════════════
+# 全局信号量（在 main.py lifespan 中初始化）
+# ═════════════════════════════════════════════════════════════════
+_semaphore: asyncio.Semaphore | None = None
+
+
+def init_semaphore():
+    """由 main.py lifespan 调用，初始化信号量"""
+    global _semaphore
+    _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    logger.info(f"[Semaphore] 并发上限设置为: {MAX_CONCURRENT_REQUESTS}")
+
+
+def get_semaphore() -> asyncio.Semaphore:
+    if _semaphore is None:
+        raise RuntimeError("Semaphore 未初始化，请检查 lifespan 配置")
+    return _semaphore
+
+
+def get_current_concurrency() -> int:
+    """返回当前正在处理的请求数"""
+    if _semaphore is None:
+        return 0
+    return MAX_CONCURRENT_REQUESTS - _semaphore._value
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -154,6 +182,7 @@ def _build_response(
                 theme_id=t["theme_id"],
                 theme_alias=t["theme_alias"],
                 theme_level=t.get("theme_level", 0),
+                theme_path=t.get("theme_path", ""),
                 is_supported=t.get("is_supported", False),
                 support_reason=t.get("support_reason", ""),
                 selected_filter_indicators=[
@@ -239,66 +268,113 @@ async def recommend_stream(req: RecommendRequest):
     request_id = req.thread_id
     start_time = time.time()
 
+    semaphore = get_semaphore()
+    current = get_current_concurrency()
+
+    # 快速拒绝：已满载时直接返回 429，不等待
+    if semaphore.locked() and current >= MAX_CONCURRENT_REQUESTS:
+        logger.warning(
+            f"[Semaphore] 并发已满 {current}/{MAX_CONCURRENT_REQUESTS}，"
+            f"拒绝请求 thread_id={request_id}"
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "too_many_requests",
+                "message": f"当前并发已达上限 {MAX_CONCURRENT_REQUESTS}，请稍后重试",
+                "current_concurrency": current,
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    # 等待获取信号量（带超时）
+    try:
+        await asyncio.wait_for(
+            semaphore.acquire(),
+            timeout=CONCURRENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[Semaphore] 等待超时 {CONCURRENT_TIMEOUT_SECONDS}s，"
+            f"拒绝请求 thread_id={request_id}"
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "timeout_waiting",
+                "message": f"等待超过 {CONCURRENT_TIMEOUT_SECONDS}s，请稍后重试",
+                "current_concurrency": get_current_concurrency(),
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    # ── 获取信号量成功，处理请求 ──────────────────────────────
+    logger.info(
+        f"[Semaphore] 获取成功，当前并发: "
+        f"{get_current_concurrency()}/{MAX_CONCURRENT_REQUESTS} "
+        f"thread_id={request_id}"
+    )
+
     logger.info(f"[{request_id}] 开始流式处理请求: {req.question}")
 
     async def event_generator() -> AsyncIterator[dict]:
         """SSE 事件生成器"""
-        agent = agent_graph.get_agent()
-
-        # 如果有 context，构建初始 conversation_history
-        initial_history = []
-        if req.context:
-            initial_history.append({
-                "round": 1,
-                "user_question": req.context.previous_question,
-                "normalized_question": req.context.previous_normalized_question,
-                "filter_indicators": [
-                    {"alias": f.alias, "value": f.value, "indicator_id": "", "type": ""}
-                    for f in req.context.previous_filter_indicators
-                ],
-                "analysis_dimensions": [
-                    {"search_term": d, "converged": True, "indicators": []}
-                    for d in req.context.previous_dimensions
-                ],
-            })
-
-        initial_state = {
-            "user_question": req.question,
-            "top_k_themes": req.top_k_themes,
-            "top_k_templates": req.top_k_templates,
-            "extracted_phrases": [],
-            "filter_indicators": [],
-            "analysis_dimensions": [],
-            "normalized_question": "",
-            "search_results": {},
-            "iteration_round": 0,
-            "iteration_log": [],
-            "is_low_confidence": False,
-            "low_confidence_message": "",
-            "low_confidence_suggestions": [],
-            "pending_confirmation": None,
-            "user_confirmation": None,
-            "conversation_history": initial_history,
-            "candidate_themes": [],
-            "recommended_themes": [],
-            "recommended_templates": [],
-            "final_output": {},
-            "execution_time_ms": 0.0,
-            "error": None,
-        }
-
-        node_order = [
-            "extract_phrases",
-            "classify_and_iterate",
-            "aggregate_themes",
-            "complete_indicators",
-            "judge_themes",
-            "retrieve_templates",
-            "analyze_templates",
-            "format_output",
-        ]
-
         try:
+            agent = agent_graph.get_agent()
+
+            # 如果有 context，构建初始 conversation_history
+            initial_history = []
+            if req.context:
+                initial_history.append({
+                    "round": 1,
+                    "user_question": req.context.previous_question,
+                    "normalized_question": req.context.previous_normalized_question,
+                    "filter_indicators": [
+                        {"alias": f.alias, "value": f.value, "indicator_id": "", "type": ""}
+                        for f in req.context.previous_filter_indicators
+                    ],
+                    "analysis_dimensions": [
+                        {"search_term": d, "converged": True, "indicators": []}
+                        for d in req.context.previous_dimensions
+                    ],
+                })
+
+            initial_state = {
+                "user_question": req.question,
+                "top_k_themes": req.top_k_themes,
+                "top_k_templates": req.top_k_templates,
+                "extracted_phrases": [],
+                "filter_indicators": [],
+                "analysis_dimensions": [],
+                "normalized_question": "",
+                "search_results": {},
+                "iteration_round": 0,
+                "iteration_log": [],
+                "is_low_confidence": False,
+                "low_confidence_message": "",
+                "low_confidence_suggestions": [],
+                "pending_confirmation": None,
+                "user_confirmation": None,
+                "conversation_history": initial_history,
+                "candidate_themes": [],
+                "recommended_themes": [],
+                "recommended_templates": [],
+                "final_output": {},
+                "execution_time_ms": 0.0,
+                "error": None,
+            }
+
+            node_order = [
+                "extract_phrases",
+                "classify_and_iterate",
+                "aggregate_themes",
+                "complete_indicators",
+                "judge_themes",
+                "retrieve_templates",
+                "analyze_templates",
+                "format_output",
+            ]
+
             final_result = None
             # 使用 LangGraph v2 streaming 格式
             async for chunk in agent.astream(
@@ -394,10 +470,18 @@ async def recommend_stream(req: RecommendRequest):
                 "event": "error",
                 "data": json.dumps({
                     "event_type": "error",
-                    "message": str(e),
+                    "message": "底层 LLM 服务调用失败，请重新提问",
                     "timestamp": time.time(),
                 }, ensure_ascii=False),
             }
+        finally:
+            # ✅ 无论正常结束还是异常，都释放信号量
+            semaphore.release()
+            logger.info(
+                f"[Semaphore] 已释放，当前并发: "
+                f"{get_current_concurrency()}/{MAX_CONCURRENT_REQUESTS} "
+                f"thread_id={request_id}"
+            )
 
     return EventSourceResponse(event_generator())
 
@@ -531,7 +615,7 @@ async def resume_stream(req: ResumeRequest):
                 "event": "error",
                 "data": json.dumps({
                     "event_type": "error",
-                    "message": str(e),
+                    "message": "底层 LLM 服务调用失败，请重新提问",
                     "timestamp": time.time(),
                 }, ensure_ascii=False),
             }
