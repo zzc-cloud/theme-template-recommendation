@@ -226,7 +226,7 @@ def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
                 "error": "向量库为空，请先运行 indicator_vectorizer.py --rebuild",
                 "query": query,
                 "execution_time_ms": round((time.time() - start_time) * 1000, 2),
-            }, ensure_ascii=False, indent=2)
+            }, ensure_ascii=False)
 
         results = collection.query(
             query_embeddings=[query_vector],
@@ -261,7 +261,7 @@ def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
             "indicator_count": len(indicators),
             "indicators":      indicators,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
@@ -270,7 +270,7 @@ def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
             "error":   str(e),
             "query":   query,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
 
 # ══════════════════════════════════════════════
@@ -308,7 +308,7 @@ def vector_search_stats() -> str:
             "embedding_model":  EMBEDDING_MODEL,
             "embedding_dim":    EMBEDDING_DIM,       # ✅ 新增维度信息
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
@@ -316,7 +316,7 @@ def vector_search_stats() -> str:
             "success": False,
             "error":   str(e),
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
 
 # ══════════════════════════════════════════════
@@ -375,7 +375,7 @@ def add_indicator_vector(
             "indicator_id": indicator_id,
             "message":      "添加/更新成功",
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
@@ -384,7 +384,7 @@ def add_indicator_vector(
             "error":        str(e),
             "indicator_id": indicator_id,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
 
 # ══════════════════════════════════════════════
@@ -418,7 +418,7 @@ def delete_indicator_vector(indicator_id: str) -> str:
                 "error":        f"指标 ID 不存在: {indicator_id}",
                 "indicator_id": indicator_id,
                 "execution_time_ms": round(elapsed, 2),
-            }, ensure_ascii=False, indent=2)
+            }, ensure_ascii=False)
 
         collection.delete(ids=[indicator_id])
 
@@ -428,7 +428,7 @@ def delete_indicator_vector(indicator_id: str) -> str:
             "indicator_id": indicator_id,
             "message":      "删除成功",
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
@@ -437,7 +437,7 @@ def delete_indicator_vector(indicator_id: str) -> str:
             "error":        str(e),
             "indicator_id": indicator_id,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False)
 
 
 # ══════════════════════════════════════════════

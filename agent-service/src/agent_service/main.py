@@ -1,0 +1,149 @@
+"""
+FastAPI 应用入口
+主题模板推荐 Agent 服务
+"""
+
+import logging
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .api.routes import router as api_router
+from .api.schemas import HealthResponse
+from .graph import graph as agent_graph
+from .tools import theme_tools
+
+# ─────────────────────────────────────────────
+# 日志配置
+# ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+# 生命周期管理
+# ─────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时
+    logger.info("=" * 60)
+    logger.info("主题模板推荐 Agent 服务启动中...")
+    logger.info("=" * 60)
+
+    # 预热 Agent（图编译）
+    try:
+        agent_graph.get_agent()
+        logger.info("LangGraph Agent 编译完成")
+    except Exception as e:
+        logger.warning(f"Agent 预热失败: {e}")
+
+    # 预热 Neo4j 连接
+    try:
+        driver = theme_tools.get_neo4j_driver()
+        driver.verify_connectivity()
+        logger.info("Neo4j 连接验证成功")
+    except Exception as e:
+        logger.warning(f"Neo4j 连接验证失败: {e}")
+
+    logger.info("服务启动完成")
+    logger.info("=" * 60)
+
+    yield
+
+    # 关闭时
+    logger.info("正在关闭服务...")
+    try:
+        theme_tools.close_neo4j_driver()
+        logger.info("Neo4j 连接已关闭")
+    except Exception:
+        pass
+
+    logger.info("服务已关闭")
+
+
+# ─────────────────────────────────────────────
+# FastAPI 应用
+# ─────────────────────────────────────────────
+app = FastAPI(
+    title="Theme Template Recommendation Agent",
+    description="魔数师主题和模板推荐 API 服务，基于 LangChain/LangGraph 实现",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS 配置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境应限制为具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 注册路由
+app.include_router(api_router)
+
+
+# ─────────────────────────────────────────────
+# 路由
+# ─────────────────────────────────────────────
+
+@app.get("/health", response_model=HealthResponse, tags=["system"])
+async def health():
+    """健康检查接口"""
+    services = {
+        "neo4j": False,
+    }
+
+    # 检查 Neo4j
+    try:
+        driver = theme_tools.get_neo4j_driver()
+        driver.verify_connectivity()
+        services["neo4j"] = True
+    except Exception as e:
+        logger.warning(f"Neo4j 健康检查失败: {e}")
+
+    all_healthy = all(services.values())
+
+    return HealthResponse(
+        status="healthy" if all_healthy else "degraded",
+        version="1.0.0",
+        services=services,
+    )
+
+
+@app.get("/", tags=["system"])
+async def root():
+    """根路径"""
+    return {
+        "service": "Theme Template Recommendation Agent",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+# ─────────────────────────────────────────────
+# 入口
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "agent_service.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info",
+    )

@@ -1,5 +1,11 @@
 {
   "mcpServers": {
+    "theme-vector": {
+      "command": "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/venv/bin/python",
+      "args": [
+        "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/theme_vector_server.py"
+      ]
+    },
     "theme-ontology": {
       "command": "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/venv/bin/python",
       "args": [
@@ -10,6 +16,12 @@
       "command": "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/venv/bin/python",
       "args": [
         "/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/mcp-server/theme_resources_server.py"
+      ]
+    },
+    "chrome": {
+      "command": "node",
+      "args": [
+        "/opt/homebrew/lib/node_modules/mcp-chrome-bridge/dist/mcp/mcp-server-stdio.js"
       ]
     }
   }

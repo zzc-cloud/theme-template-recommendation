@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__chrome__chrome_click_element",
+      "mcp__chrome__chrome_screenshot",
+      "mcp__chrome__chrome_navigate",
+      "mcp__chrome__chrome_console",
+      "mcp__chrome__chrome_network_request",
+      "mcp__chrome__chrome_computer",
+      "mcp__chrome__chrome_network_capture",
+      "mcp__chrome__chrome_keyboard",
+      "mcp__chrome__chrome_read_page",
+      "mcp__chrome__chrome_fill_or_select",
+      "mcp__chrome__chrome_get_web_content",
+      "mcp__chrome__chrome_get_windows_and_tabs",
+      "mcp__chrome__chrome_javascript",
+      "mcp__chrome__chrome_bookmark_search",
+      "mcp__chrome__chrome_bookmark_add",
+      "mcp__chrome__chrome_bookmark_delete",
+      "mcp__chrome__chrome_history",
+      "mcp__chrome__chrome_network_capture",
+      "mcp__chrome__chrome_network_request",
+      "mcp__chrome__chrome_handle_download",
+      "mcp__chrome__chrome_handle_dialog",
+      "mcp__chrome__chrome_close_tabs",
+      "mcp__chrome__chrome_switch_tab",
+      "mcp__chrome__chrome_upload_file",
+      "mcp__chrome__chrome_console",
+      "mcp__chrome__chrome_performance_start_trace",
+      "mcp__chrome__chrome_performance_stop_trace",
+      "mcp__chrome__chrome_performance_analyze_insight",
+      "mcp__chrome__chrome_gif_recorder"
+    ]
+  }
+}

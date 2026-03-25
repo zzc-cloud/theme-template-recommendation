@@ -53,6 +53,33 @@
 | `get_indicator_field_mapping_mysql` | 指标→字段映射（MySQL） | 1 |
 | `get_table_columns_bigmeta` | 表字段详情 | 1 |
 
+### Chrome MCP（浏览器自动化）
+
+当需要访问具体 URL、抓取页面内容或截图时，使用 MCP Chrome 浏览器。**不要尝试 WebFetch**（该工具不可用）。
+
+**配置**：项目已配置 MCP Chrome，位于 [.mcp.json](.mcp.json)。
+
+**可用工具**：
+
+| 工具                        | 功能                           |
+| --------------------------- | ------------------------------ |
+| `mcp__chrome__get_windows_and_tabs` | 获取所有窗口和标签页           |
+| `mcp__chrome__navigate`     | 导航到指定 URL                  |
+| `mcp__chrome__get_visible_text` | 获取页面可见文本               |
+| `mcp__chrome__click_element` | 点击页面元素                   |
+| `mcp__chrome__fill_form_input` | 填写表单输入框                 |
+| `mcp__chrome__submit_form`  | 提交表单                       |
+| `mcp__chrome__take_screenshot` | 截取页面截图                   |
+| `mcp__chrome__execute_javascript` | 执行 JavaScript               |
+
+**典型工作流**：
+
+1. **搜索 + 抓取**：先用 `WebSearch` 获取搜索结果 → 导航到目标 URL → 用 MCP Chrome 抓取页面内容或截图
+2. **直接抓取**：导航到目标 URL → 获取页面文本或截图
+3. **表单填写**：自动填写和提交表单
+
+**注意**：使用 MCP Chrome 前请确保 Chrome 浏览器已打开。
+
 ---
 
 ## 执行流程
