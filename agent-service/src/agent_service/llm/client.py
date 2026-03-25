@@ -29,6 +29,11 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+
+class LLMCallError(RuntimeError):
+    """底层 LLM 调用失败（含重试耗尽），统一向上抛出"""
+    pass
+
 # ─────────────────────────────────────────────
 # 全局 LLM 客户端（延迟初始化）
 # ─────────────────────────────────────────────
@@ -178,7 +183,7 @@ def invoke_structured(
         Pydantic 模型实例
 
     Raises:
-        RuntimeError: 当 LLM 调用失败且重试耗尽时
+        LLMCallError: 当 LLM 调用失败且重试耗尽时
     """
     last_error = None
     timeout = config.LLM_CALL_TIMEOUT_SECONDS
@@ -212,7 +217,7 @@ def invoke_structured(
             )
             time.sleep(sleep_time)
 
-    raise RuntimeError(f"LLM调用失败（已重试）[{model.__name__}]: {last_error}")
+    raise LLMCallError(f"LLM调用失败（已重试）[{model.__name__}]: {last_error}")
 
 
 # ─────────────────────────────────────────────

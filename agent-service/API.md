@@ -1,6 +1,6 @@
 # 主题模板推荐服务 API 对接文档
 
-> **版本**：v1.0
+> **版本**：v1.4（LLM 调用失败整批终止，统一错误提示）
 > **协议**：HTTP + SSE（Server-Sent Events）
 > **Base URL**：`http://{host}/api/v1`
 
@@ -18,7 +18,8 @@
 - [完整交互时序图](#8-完整交互时序图)
 - [前端状态机设计](#9-前端状态机设计)
 - [错误处理](#10-错误处理)
-- [完整调用示例](#11-完整调用示例)
+- [并发控制说明](#11-并发控制说明)
+- [完整调用示例](#12-完整调用示例)
 
 ---
 
@@ -28,7 +29,8 @@
 |------|------|------|----------|
 | `/api/v1/recommend` | POST | 发起推荐，建立 SSE 流 | 用户提交新问题时 |
 | `/api/v1/resume` | POST | 恢复执行，建立 SSE 流 | 用户完成维度确认后 |
-| `/api/v1/health` | GET | 健康检查 | 服务探活 |
+| `/health` | GET | 健康检查 | 服务探活（根路径，无 /api/v1 前缀） |
+| `/health/memory` | GET | 内存状态检查 | 监控 TTLMemorySaver 会话内存状态（TTL=1天） |
 
 > **重要**：两个推荐接口均返回 SSE 流，不是普通 JSON 响应。前端必须使用流式读取方式处理。
 
@@ -60,11 +62,39 @@ data: {"event_type": "stage_complete", "stage": "extract_phrases", ...}\n
 
 | event_type | 含义 | 前端动作 |
 |------------|------|----------|
-| `stage_complete` | 某个处理阶段完成 | 更新进度条/步骤状态 |
-| `custom` | 阶段内部进度详情 | 更新进度描述文字 |
-| `interrupt` | 需要用户确认 | 停止等待，展示确认界面 |
-| `final` | 流程全部完成，携带最终结果 | 展示推荐结果 |
+| `stage_complete` | 某个处理阶段完成，含可选 markdown 进度文字 | 更新步骤状态；若 markdown 非 null 则渲染 |
+| `progress` | 阶段内部细粒度进度，含预渲染 markdown 文字和原始 raw 数据 | 渲染 markdown 进度描述 |
+| `interrupt` | 需要用户确认（两种子类型） | 展示确认界面或换词引导 |
+| `final` | 流程完成，携带完整推荐结果 | 展示推荐结果 |
 | `error` | 发生错误 | 展示错误提示 |
+
+### 2.4 markdown 字段设计说明
+
+服务端为每个 `progress` 和部分 `stage_complete` 事件预渲染了 Markdown 格式的进度文字，通过 `markdown` 字段传递给前端。
+
+**设计意图**：
+- **零成本渲染**：前端无需自行拼接进度文字，直接将 `markdown` 内容追加到聊天气泡或日志区域即可
+- **渐进式覆盖**：
+  - `stage_complete.markdown` 可能为 `null`，表示该阶段的进度文字已由 `progress` 事件提供（避免重复）
+  - 详见 [5.1 节 stage 值对照表](#51-stage_complete--阶段完成)
+
+**渲染示例**：
+
+```html
+<!-- 直接渲染 markdown 字段 -->
+<div class="progress-log">
+  <pre id="progress-container"></pre>
+</div>
+```
+
+```javascript
+// progress 事件到达时
+const progressContainer = document.getElementById('progress-container');
+progressContainer.textContent += event.markdown + '\n';
+
+// 或追加到聊天记录（支持 Markdown 渲染）
+chatLog.append({ role: 'system', content: event.markdown });
+```
 
 ---
 
@@ -81,7 +111,7 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `thread_id` | string | ✅ | 会话唯一标识，由前端自行生成（推荐 UUID），每个新问题必须使用全新的 thread_id |
+| `thread_id` | string | ✅ | 会话唯一标识，由前端自行生成（推荐 UUID），每个新问题必须使用全新的 thread_id。<br><br>⚠️ **生命周期约束**：<br>• 同一 thread_id 只能用于"同一问题的 /recommend + /resume"流程，不可复用于新问题<br>• 服务重启后 thread_id 全部失效（TTLMemorySaver 进程内存），需重新生成<br>• 同一 thread_id 超过 1 天未活跃会被自动清理，再次使用会视为新会话 |
 | `question` | string | ✅ | 用户自然语言问题，长度 1~500 字符 |
 | `top_k_themes` | int | ❌ | 返回主题数量上限，默认 3，范围 1~10 |
 | `top_k_templates` | int | ❌ | 返回模板数量上限，默认 5，范围 1~20 |
@@ -136,7 +166,7 @@ Content-Type: application/json
 |------|------|------|------|
 | `thread_id` | string | ✅ | 与 /recommend 请求中完全相同的 thread_id |
 | `confirmed_dimensions` | array\<string\> | ✅ | 用户勾选的分析维度列表，值为 search_term（来自 interrupt 事件中的 `dimension_options[].search_term`） |
-| `confirmed_question` | string | ❌ | 用户确认或修改后的问题描述，不传则使用服务端生成的规范化问题 |
+| `confirmed_question` | string | ❌ | 用户确认或修改后的问题描述。**为空字符串时**，服务端自动使用规范化问题（来自 interrupt 事件的 `pending_confirmation.normalized_question`） |
 
 ### 请求示例
 
@@ -157,44 +187,64 @@ Content-Type: application/json
 ```json
 {
   "event_type": "stage_complete",
-  "stage": "classify_and_iterate",
+  "stage": "aggregate_themes",
+  "markdown": "│ ✅ **[1.1]** 候选主题聚合完成",
   "timestamp": 1718000000.123
 }
 ```
 
+**stage_complete 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `stage` | string | 完成的阶段节点名称 |
+| `markdown` | string \| null | 该阶段的进度文字，部分阶段有值（见下表），部分为 null（由 progress 事件覆盖） |
+| `timestamp` | number | 事件时间戳 |
+
 **stage 值对应关系**：
 
-| stage 值 | 含义 |
-|----------|------|
-| `extract_phrases` | 词组提取完成 |
-| `classify_and_iterate` | 迭代精炼完成 |
-| `wait_for_confirmation` | 确认节点（resume 后恢复时出现） |
-| `aggregate_themes` | 主题聚合完成 |
-| `complete_indicators` | 指标补全完成 |
-| `judge_themes` | 主题裁决完成 |
-| `retrieve_templates` | 模板检索完成 |
-| `analyze_templates` | 模板可用性分析完成 |
-| `format_output` | 结果格式化完成 |
+**哪些 stage 的 stage_complete.markdown 有值**：
 
-> **前端建议**：维护一个步骤列表，收到对应 stage 时将该步骤标记为"已完成"。
+| stage 值 | 含义 | markdown 值 |
+|----------|------|-------------|
+| `extract_phrases` | 词组提取完成 | null（由 progress 事件覆盖） |
+| `classify_and_iterate` | 迭代精炼完成 | null（由 progress 事件覆盖） |
+| `wait_for_confirmation` | 确认节点 | null（由 interrupt 事件覆盖） |
+| `aggregate_themes` | 主题聚合完成 | `"│ ✅ [1.1] 候选主题聚合完成"` |
+| `complete_indicators` | 指标补全完成 | `"│ ✅ [1.2] 全量指标补全完成"` |
+| `judge_themes` | 主题裁决完成 | null（由 progress 事件覆盖） |
+| `retrieve_templates` | 模板检索完成 | `"│ ✅ [2.1] 模板检索完成"` |
+| `analyze_templates` | 模板可用性分析完成 | null（由 progress 事件覆盖） |
+| `format_output` | 结果格式化完成 | `"\n✅ 所有阶段执行完毕，正在生成推荐结果..."` |
 
-### 5.2 custom — 阶段内部进度
+> **前端建议**：维护一个步骤列表，收到对应 stage 时将该步骤标记为"已完成"。若 markdown 非 null，可渲染该文字。
+
+### 5.2 progress — 阶段内部进度
 
 ```json
 {
-  "event_type": "custom",
-  "data": {
+  "event_type": "progress",
+  "markdown": "│ **[0.3] 第 1 轮迭代精炼**\n│   🔍 搜索词：`小微企业贷款`、`不良率`",
+  "raw": {
     "stage": "classify_and_iterate",
     "step": "searching",
     "status": "in_progress",
-    "round": 2,
+    "round": 1,
     "concepts": ["小微企业贷款", "不良率"]
   },
   "timestamp": 1718000000.456
 }
 ```
 
-> **前端建议**：可用于展示"正在搜索第2轮..."等细粒度进度描述，非必须处理。
+**progress 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `markdown` | string | 服务端预渲染的 Markdown 格式进度文字，前端可直接渲染（追加到聊天气泡或日志区域），无需自行拼接 |
+| `raw` | object | 原始节点数据，包含 stage、step、status 等，可用于前端自行渲染进度条 |
+| `timestamp` | number | 事件时间戳 |
+
+> **前端建议**：可直接将 markdown 字段的内容追加到进度展示区域，无需自行拼接进度文字。raw 字段可忽略或用于实现自定义进度条。
 
 ### 5.3 interrupt — ⚠️ 需要用户确认（最重要）
 
@@ -256,8 +306,11 @@ Content-Type: application/json
 | `dimension_options` | array | 待用户确认的分析维度列表，支持多选 |
 | `dimension_options[].search_term` | string | 维度标识，调用 /resume 时用此值 |
 | `dimension_options[].converged` | bool | 是否高置信度收敛（true 表示匹配质量好） |
-| `dimension_options[].top_indicator_aliases` | array\<string\> | 该维度关联的 Top 5 指标名称，辅助用户理解 |
+| `dimension_options[].top_indicator_aliases` | array\<string\> | 该维度关联的 Top 5 指标别名（从 top_indicators 提取），辅助用户理解 |
+| `dimension_options[].top_indicators` | array\<object\> | 该维度关联的 Top 5 指标完整对象，含 id、alias、similarity_score |
 | `normalized_question` | string | 服务端生成的规范化问题，用户可修改后传回 |
+
+> **注意**：`top_indicator_aliases` 是 `top_indicators` 的 alias 提取，两者内容一一对应。
 
 ### 5.4 interrupt（低置信度类型）
 
@@ -284,6 +337,15 @@ Content-Type: application/json
 ```
 
 > **重要**：低置信度时，前端应引导用户修改问题，然后重新调用 /recommend（生成新的 thread_id），而不是调用 /resume。
+
+**低置信度 pending_confirmation 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 固定为 `"low_confidence"` |
+| `message` | string | 面向用户的友好提示信息 |
+| `suggestions` | array | 换词建议列表，每项含 concept（无法匹配的概念）、reason（原因）、alternatives（建议替换词） |
+| `action_required` | string | 告知用户下一步操作指引 |
 
 ### 5.5 final — 最终结果
 
@@ -376,6 +438,7 @@ Content-Type: application/json
 
 | 字段路径 | 说明 |
 |----------|------|
+| `analysis_dimensions[].indicators` | 包含全量搜索结果（最多 VECTOR_SEARCH_TOP_K = 20 条）。追问时，前端只需取 `analysis_dimensions[].search_term` 构造 `context.previous_dimensions`，无需传递 indicators 数据。 |
 | `recommended_themes[].is_supported` | true 为推荐主题，false 为不推荐（仍会返回，需标注） |
 | `recommended_templates[].coverage_ratio` | 覆盖率 0.0~1.0，建议展示为百分比 |
 | `recommended_templates[].has_qualified_templates` | false 表示为降级推荐，需在界面上标注 |
@@ -384,13 +447,31 @@ Content-Type: application/json
 
 ### 5.6 error — 错误
 
+当批量 LLM 调用（主题裁决、模板分析）中任意一个失败，整批立即终止，通过 SSE error 事件告知前端。
+
+**重要**：error 事件统一返回用户友好提示，前端应引导用户重新提问（生成新 thread_id），而非展示原始异常信息。
+
 ```json
 {
   "event_type": "error",
-  "message": "向量搜索服务连接超时",
+  "message": "底层 LLM 服务调用失败，请重新提问",
   "timestamp": 1718000005.000
 }
 ```
+
+**触发场景**：
+
+| 触发点 | 说明 |
+|--------|------|
+| `judge_themes` 节点 | 任意主题的 LLM 裁决失败，或整批超过 `LLM_BATCH_TIMEOUT_SECONDS`（默认 310s） |
+| `analyze_templates` 节点 | 任意模板的 LLM 可用性分析失败，或整批超过 `LLM_BATCH_TIMEOUT_SECONDS`（默认 310s） |
+| `invoke_structured` 重试耗尽 | 单次 LLM 调用经全部重试后仍失败 |
+
+**前端处理建议**：
+1. 收到 error 事件后，切换到 error 状态
+2. 展示错误提示："底层 LLM 服务调用失败，请重新提问"
+3. 提示用户重新提问，**使用新的 thread_id**（原 thread_id 仍可用于 resume，但建议重新开始）
+4. 可实现自动重试，但建议先展示错误让用户决定
 
 ---
 
@@ -566,7 +647,7 @@ async function askFollowUp(newQuestion) {
 
 // 每次收到 final 事件后，更新 sessionState
 function onFinalEvent(data) {
-  sessionState.lastQuestion = data.question  // 原始问题
+  // 注意：final.data 中不包含原始问题，原始问题由前端在发起请求时自行缓存
   sessionState.lastNormalizedQuestion = data.normalized_question
   sessionState.lastFilterIndicators = data.filter_indicators.map(f => ({
     alias: f.alias,
@@ -589,10 +670,10 @@ function onFinalEvent(data) {
   │  { thread_id, question, ... }          │
   │ ──────────────────────────────────>   │
   │                                        │ extract_phrases
-  │  <── SSE: custom (进度)                │ classify_and_iterate
+  │  <── SSE: progress (进度)              │ classify_and_iterate
   │  <── SSE: stage_complete               │
-  │  <── SSE: custom (搜索第1轮)           │
-  │  <── SSE: custom (搜索第2轮)           │
+  │  <── SSE: progress (搜索第1轮)         │
+  │  <── SSE: progress (搜索第2轮)         │
   │  <── SSE: stage_complete               │
   │                                        │ wait_for_confirmation
   │  <── SSE: interrupt ───────────────────┤ ← 流程暂停
@@ -619,7 +700,7 @@ function onFinalEvent(data) {
   │                                        │ wait_for_confirmation 继续
   │  <── SSE: stage_complete               │ aggregate_themes
   │  <── SSE: stage_complete               │ complete_indicators
-  │  <── SSE: custom (裁决中)             │ judge_themes
+  │  <── SSE: progress (裁决中)           │ judge_themes
   │  <── SSE: stage_complete               │ retrieve_templates
   │  <── SSE: stage_complete               │ analyze_templates
   │  <── SSE: stage_complete               │ format_output
@@ -656,7 +737,7 @@ function onFinalEvent(data) {
 [idle]
   │ 用户提交问题
   ↓
-[loading] ── 收到 stage_complete / custom ──> [loading]（更新进度）
+[loading] ── 收到 stage_complete / progress ──> [loading]（更新进度）
   │
   ├── 收到 interrupt (normal) ──────────────> [waiting_confirmation]
   │                                               │ 用户点击确认
@@ -690,9 +771,14 @@ function onFinalEvent(data) {
 | 问题为空或过长 | HTTP 422，请求被拒绝 | 前端输入校验，提示用户 |
 | thread_id 已被使用过（非 resume） | error 事件，状态冲突 | 生成新 thread_id 重试 |
 | 使用错误的 thread_id 调用 /resume | error 事件，找不到会话 | 提示用户重新提问 |
+| thread_id 超过 1 天未活跃 | 会话被自动清理（TTL） | 视为新会话，重新发起流程 |
 | 向量搜索服务超时 | error 事件 | 提示"服务繁忙，请稍后重试" |
+| 主题裁决 LLM 调用失败 | error 事件，"底层 LLM 服务调用失败，请重新提问" | 提示用户重新提问（使用新 thread_id） |
+| 模板分析 LLM 调用失败 | error 事件，"底层 LLM 服务调用失败，请重新提问" | 提示用户重新提问（使用新 thread_id） |
+| 批量 LLM 任务超时 | error 事件，"底层 LLM 服务调用失败，请重新提问" | 提示用户重新提问（使用新 thread_id） |
 | 所有主题均不支持 | final 事件，recommended_themes 全为 is_supported: false | 展示"未找到匹配主题"提示 |
 | 无达标模板（降级推荐） | final 事件，has_qualified_templates: false | 展示降级提示标注 |
+| 并发超限（429） | HTTP 429 Too Many Requests | 提示"系统繁忙，请稍后重试"（详见[并发控制说明](#11-并发控制说明)） |
 
 ### 10.2 SSE 连接中断处理
 
@@ -711,7 +797,115 @@ clearTimeout(timer)
 
 ---
 
-## 11. 完整调用示例
+## 11. 并发控制说明
+
+### 11.1 机制概述
+
+服务内置基于 `asyncio.Semaphore` 的并发控制机制，防止服务因过多并发请求而过载。
+
+| 参数 | 默认值 | 说明 | 配置方式 |
+|------|--------|------|----------|
+| `MAX_CONCURRENT_REQUESTS` | 10 | 最大并发请求数 | 环境变量 `.env` |
+| `CONCURRENT_TIMEOUT_SECONDS` | 5.0 | 等待信号量的超时时间（秒） | 环境变量 `.env` |
+| `LLM_BATCH_TIMEOUT_SECONDS` | 310 | 批量 LLM 任务的超时时间（秒）。主题裁决或模板分析任一任务超时时，整批立即终止并返回 error | 环境变量 `.env` |
+
+### 11.2 并发超限处理
+
+当并发请求数达到上限时，服务会返回 **HTTP 429 Too Many Requests**：
+
+**快速拒绝场景**（当前并发已满）：
+
+```json
+{
+  "detail": {
+    "error": "too_many_requests",
+    "message": "当前并发已达上限 10，请稍后重试",
+    "current_concurrency": 10,
+    "max_concurrency": 10
+  }
+}
+```
+
+**超时场景**（等待信号量超时）：
+
+```json
+{
+  "detail": {
+    "error": "timeout_waiting",
+    "message": "等待超过 5.0s，请稍后重试",
+    "current_concurrency": 10,
+    "max_concurrency": 10
+  }
+}
+```
+
+### 11.3 前端处理建议
+
+收到 429 响应时：
+
+1. **展示友好提示**："系统繁忙，请稍后重试"
+2. **自动重试**：可实现指数退避重试（Exponential Backoff）
+3. **降级处理**：提示用户稍后再试，或提供排队等待机制
+
+```typescript
+// 示例：带退避的请求函数
+async function requestWithBackoff(url: string, body: object, maxRetries = 3): Promise<Response> {
+  for (let i = 0; i < maxRetries; i++) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (response.status === 429) {
+      const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s
+      console.warn(`并发超限，${delay}ms 后重试...`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+
+    return response;
+  }
+  throw new Error('请求失败，请稍后重试');
+}
+```
+
+### 11.4 监控并发状态
+
+通过 `/health` 接口可获取当前并发状态：
+
+```bash
+curl http://localhost:8000/health
+```
+
+**响应示例**：
+
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "services": {
+    "neo4j": true
+  },
+  "concurrency": {
+    "current": 3,
+    "max": 10,
+    "available": 7
+  }
+}
+```
+
+**字段说明**：
+
+| 字段 | 说明 |
+|------|------|
+| `concurrency.current` | 当前正在处理的请求数 |
+| `concurrency.max` | 最大并发数上限 |
+| `concurrency.available` | 可用槽位数（max - current）|
+
+---
+
+## 12. 完整调用示例
 
 ### TypeScript/JavaScript 完整示例
 
@@ -721,7 +915,6 @@ class RecommendClient {
   private state: string = 'idle';
   // 用于追问的会话摘要
   private lastSession: {
-    question: string;
     normalizedQuestion: string;
     filterIndicators: Array<{ alias: string; value: string }>;
     dimensions: string[];
@@ -829,13 +1022,23 @@ class RecommendClient {
   // ── 事件分发 ──
   private handleEvent(event: Record<string, unknown>): void {
     switch (event.event_type) {
-      case 'stage_complete':
-        this.onStageComplete(event.stage as string);
+      case 'stage_complete': {
+        const stageEvent = event as {
+          stage: string;
+          markdown: string | null;
+        };
+        this.onStageComplete(stageEvent.stage, stageEvent.markdown);
         break;
+      }
 
-      case 'custom':
-        this.onProgress(event.data as Record<string, unknown>);
+      case 'progress': {
+        const progressEvent = event as {
+          markdown: string;
+          raw: Record<string, unknown>;
+        };
+        this.onProgress(progressEvent.markdown, progressEvent.raw);
         break;
+      }
 
       case 'interrupt': {
         const interruptEvent = event as {
@@ -858,7 +1061,6 @@ class RecommendClient {
       case 'final': {
         const finalEvent = event as {
           data: {
-            question?: string;
             normalized_question: string;
             filter_indicators: Array<{ alias: string; value: string }>;
             analysis_dimensions: Array<{ search_term: string }>;
@@ -866,8 +1068,8 @@ class RecommendClient {
         };
         this.state = 'completed';
         // 保存本轮会话摘要，供下次追问使用
+        // 注意：原始问题 this.question 在发起请求时已缓存，final 中不再返回
         this.lastSession = {
-          question: finalEvent.data.question ?? '',
           normalizedQuestion: finalEvent.data.normalized_question,
           filterIndicators: finalEvent.data.filter_indicators.map(f => ({
             alias: f.alias,
@@ -887,14 +1089,17 @@ class RecommendClient {
   }
 
   // ── 以下方法由业务层实现 ──
-  onStageComplete(stage: string): void {
-    // 更新进度条
+  onStageComplete(stage: string, markdown: string | null): void {
+    // 更新进度条；markdown 非 null 时可渲染进度文字
     console.log(`阶段完成: ${stage}`);
+    if (markdown) {
+      console.log(`  → ${markdown}`);
+    }
   }
 
-  onProgress(data: Record<string, unknown>): void {
-    // 更新进度描述
-    console.log('进度:', data);
+  onProgress(markdown: string, raw: Record<string, unknown>): void {
+    // 直接渲染 markdown 进度文字，或使用 raw 数据自定义进度条
+    console.log(markdown);
   }
 
   onInterrupt(pending: Record<string, unknown>): void {
@@ -960,6 +1165,9 @@ client.ask('那对公贷款呢？', true);
     │  收到 final  ← thread_id 使命结束 ──────────────────────────────┘
     │
     └─ 用户追问 → 生成新 thread_id → 重复上述流程
+
+⚠️ 注意：超过 1 天未活跃的 thread_id 会被自动清理，
+   下次使用时视为新会话（推荐通过 context 机制传递上下文）。
 ```
 
 ---
@@ -973,6 +1181,47 @@ client.ask('那对公贷款呢？', true);
 | 缺口较大建议谨慎 | 缺失核心指标，需较多调整才能满足需求 | ⚠️ |
 
 ---
+
+## 附录：TTL Memory 管理
+
+### TTLMemorySaver 机制
+
+服务内置基于 `TTLMemorySaver` 的自动内存管理：
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| TTL | 86400 秒（1天） | thread 超过此时间未活跃则标记为过期 |
+| 清理间隔 | 600 秒（10分钟） | 后台任务周期性执行清理 |
+| 线程安全 | 是 | 使用 `Lock` 保护时间戳字典 |
+
+**清理范围**：
+- `storage`：thread 的 checkpoint 快照
+- `writes`：thread 的写操作记录
+- `_timestamps`：thread 最后活跃时间
+
+**监控接口**：
+
+```
+GET /health/memory
+```
+
+**响应示例**：
+
+```json
+{
+  "status": "ok",
+  "ttl_seconds": 86400,
+  "total_threads": 15,
+  "active_threads": 12,
+  "expired_threads": 3
+}
+```
+
+### 前端需要注意的事项
+
+1. **thread_id 不要长期复用**：同一 thread_id 超过 1 天未使用会被自动清理，下次请求会视为新会话（对话历史丢失）
+2. **建议**：追问时使用 `context` 机制传递上下文，而不是依赖 session 恢复
+3. **监控**：可通过 `/health/memory` 接口监控服务内存状态，若 `total_threads` 持续增长可考虑缩短 TTL
 
 ## 附录：覆盖率说明
 

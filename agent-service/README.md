@@ -36,6 +36,7 @@
 | 迭代精炼 | 最多 3 轮搜索词修正，自动收敛 |
 | 结构化输出 | 使用 `with_structured_output()` 替代手动 JSON 解析 |
 | 重试机制 | 按错误类型差异化重试（限流/超时/5xx/认证/格式/未知），指数退避 + jitter |
+| 批量失败终止 | 主题裁决、模板分析等批量 LLM 调用，任一失败整批立即终止，统一通过 SSE error 事件告知前端 |
 | 会话恢复 | 基于 TTLMemorySaver 的 Checkpointer（1天TTL自动清理） |
 | 并发控制 | 基于 Semaphore 的并发上限保护（默认10并发，可配置） |
 
@@ -197,92 +198,6 @@ curl -s -N -X POST http://localhost:8000/api/v1/recommend \
 服务运行在 http://localhost:8000
 API 文档：http://localhost:8000/docs
 
----
-
-## 本体层构建
-
-本服务依赖 Neo4j 图数据库存储业务知识图谱（主题、指标、模板）。`scripts/` 目录提供了本体层的 ETL 构建脚本。
-
-### 本体层结构
-
-| 节点类型 | 说明 | 数据来源 |
-|---------|------|---------|
-| `SECTOR` | 板块 | t_restree |
-| `CATEGORY` | 分类 | t_restree |
-| `THEME` | 主题（核心） | t_restree |
-| `SUBPATH` | 子路径 | t_restree |
-| `INDICATOR` | 指标（核心） | t_restree |
-| `INSIGHT_TEMPLATE` | 透视分析模板 | T_EXT_INSIGHT |
-| `COMBINEDQUERY_TEMPLATE` | 万能查询模板 | T_EXT_COMBINEDQUERY |
-
-| 关系类型 | 说明 |
-|---------|------|
-| `HAS_CHILD` | 层级导航（树形结构） |
-| `CONTAINS` | 模板包含指标（带 position 属性） |
-
-### 首次初始化
-
-```bash
-cd scripts
-
-# 1. 配置环境变量
-cp .env.example .env
-# 编辑 .env 填写 MySQL 和 Neo4j 连接信息
-
-# 2. 执行全量初始化
-python init_ontology.py
-```
-
-执行流程：
-1. 测试数据库连接
-2. 抽取魔数师指标层数据（~17万条）
-3. 构建层级结构
-4. 抽取模板数据（INSIGHT + COMBINEDQUERY）
-5. 计算模板热度
-6. 创建 Neo4j 约束和索引
-7. 导入节点和关系
-8. 清理临时板块
-
-### 增量更新（每月执行）
-
-```bash
-# 自动读取上次更新时间
-python update_ontology.py
-
-# 指定更新时间
-python update_ontology.py --last-update "2024-01-01 00:00:00"
-
-# 强制全量更新
-python update_ontology.py --full
-```
-
-### 自动化调度
-
-```bash
-# crontab 配置：每月 1 日凌晨 2 点执行
-0 2 1 * * cd /path/to/agent-service/scripts && python3 update_ontology.py >> logs/update.log 2>&1
-```
-
-### 验证
-
-```cypher
-// Neo4j Browser 查询
-// 查看节点统计
-MATCH (n)
-RETURN labels(n)[0] as type, count(n) as count
-ORDER BY count DESC;
-
-// 查看热门模板
-MATCH (t:INSIGHT_TEMPLATE)
-WHERE t.heat > 0
-RETURN t.alias, t.heat, t.theme_id
-ORDER BY t.heat DESC
-LIMIT 10;
-```
-
-详细说明请参考 [scripts/README.md](scripts/README.md)。
-
----
 
 ## API 参考
 
@@ -427,6 +342,7 @@ data: {"event_type": "final", "data": {...}, "timestamp": 1710000005.0}
 | `MAX_CONCURRENT_REQUESTS` | 10 | 最大并发请求数（超限返回429） |
 | `CONCURRENT_TIMEOUT_SECONDS` | 5.0 | 等待信号量的超时时间（秒） |
 | `LLM_CALL_TIMEOUT_SECONDS` | 60.0 | LLM 单次调用超时时间（秒） |
+| `LLM_BATCH_TIMEOUT_SECONDS` | 310 | 批量 LLM 任务的总超时（秒）。超时时整批终止，返回 SSE error |
 | `LLM_MAX_RETRIES_*` | 按类型 | 各错误类型的最大重试次数（见下表） |
 | `LLM_BASE_DELAY_*` | 按类型 | 各错误类型的初始退避延迟（秒） |
 | `LLM_MAX_DELAY_*` | 按类型 | 各错误类型的最大退避延迟（秒） |
@@ -530,6 +446,9 @@ curl http://localhost:8000/health/memory
 |------|--------|------|
 | `MAX_CONCURRENT_REQUESTS` | 10 | 最大并发请求数上限 |
 | `CONCURRENT_TIMEOUT_SECONDS` | 5.0 | 等待信号量的超时时间（秒） |
+| `LLM_BATCH_TIMEOUT_SECONDS` | 310 | 批量 LLM 任务的总超时（秒）。主题裁决或模板分析任一任务超时时，整批立即终止 |
+
+> **批量失败策略**：主题裁决、模板分析等批量 LLM 调用中，任一任务失败或超时都会导致整批立即终止，通过 SSE error 事件返回"底层 LLM 服务调用失败，请重新提问"，不再进行降级处理。
 
 **处理机制**：
 - 当前并发数 >= 上限时，新请求快速返回 429（Too Many Requests）
@@ -578,7 +497,7 @@ LLM 调用通过 `invoke_structured()` 实现，核心特性：
 2. 失败后分类错误类型，查询重试配置
 3. 计算延迟：`min(base_delay × 2^attempt, max_delay) + jitter`
 4. 等待后重试，最多尝试 `1 + max_retries` 次
-5. 最终失败抛出 `RuntimeError`，包含错误类型和原因
+5. 最终失败抛出 `LLMCallError`，包含错误类型和原因
 
 **无需额外处理**：所有 LLM 调用（`extract_phrases`、`classify_phrases` 等）已内置重试，无需在业务代码中处理。
 

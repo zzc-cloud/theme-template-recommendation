@@ -120,6 +120,10 @@ CONCURRENT_TIMEOUT_SECONDS: float = float(os.getenv("CONCURRENT_TIMEOUT_SECONDS"
 # ─────────────────────────────────────────────
 LLM_CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "60.0"))
 
+# 批量 LLM 任务超时（秒）
+# 推算：单次60s × 最多4次调用 + RATE_LIMIT最大退避35s + 30s余量 ≈ 310s
+LLM_BATCH_TIMEOUT_SECONDS: int = int(os.getenv("LLM_BATCH_TIMEOUT_SECONDS", "310"))
+
 # 按错误类型的最大重试次数（0 = 不重试）
 LLM_MAX_RETRIES_RATE_LIMIT:   int = int(os.getenv("LLM_MAX_RETRIES_RATE_LIMIT",   "3"))
 LLM_MAX_RETRIES_TIMEOUT:      int = int(os.getenv("LLM_MAX_RETRIES_TIMEOUT",      "2"))
