@@ -106,3 +106,40 @@ DEFAULT_TOP_K_TEMPLATES: int = int(os.getenv("DEFAULT_TOP_K_TEMPLATES", "5"))
 
 # 向量搜索 top_k
 VECTOR_SEARCH_TOP_K: int = int(os.getenv("VECTOR_SEARCH_TOP_K", "20"))
+
+
+# ─────────────────────────────────────────────
+# 并发控制配置
+# ─────────────────────────────────────────────
+MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
+CONCURRENT_TIMEOUT_SECONDS: float = float(os.getenv("CONCURRENT_TIMEOUT_SECONDS", "5.0"))
+
+
+# ─────────────────────────────────────────────
+# LLM 重试配置（集中化管理）
+# ─────────────────────────────────────────────
+LLM_CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "60.0"))
+
+# 按错误类型的最大重试次数（0 = 不重试）
+LLM_MAX_RETRIES_RATE_LIMIT:   int = int(os.getenv("LLM_MAX_RETRIES_RATE_LIMIT",   "3"))
+LLM_MAX_RETRIES_TIMEOUT:      int = int(os.getenv("LLM_MAX_RETRIES_TIMEOUT",      "2"))
+LLM_MAX_RETRIES_SERVER_ERROR: int = int(os.getenv("LLM_MAX_RETRIES_SERVER_ERROR", "2"))
+LLM_MAX_RETRIES_SCHEMA_ERROR: int = int(os.getenv("LLM_MAX_RETRIES_SCHEMA_ERROR", "1"))
+LLM_MAX_RETRIES_AUTH_ERROR:   int = int(os.getenv("LLM_MAX_RETRIES_AUTH_ERROR",   "0"))
+LLM_MAX_RETRIES_UNKNOWN:      int = int(os.getenv("LLM_MAX_RETRIES_UNKNOWN",      "1"))
+
+# 按错误类型的初始退避延迟（秒）
+LLM_BASE_DELAY_RATE_LIMIT:   float = float(os.getenv("LLM_BASE_DELAY_RATE_LIMIT",   "5.0"))
+LLM_BASE_DELAY_TIMEOUT:      float = float(os.getenv("LLM_BASE_DELAY_TIMEOUT",      "2.0"))
+LLM_BASE_DELAY_SERVER_ERROR: float = float(os.getenv("LLM_BASE_DELAY_SERVER_ERROR", "1.0"))
+LLM_BASE_DELAY_SCHEMA_ERROR: float = float(os.getenv("LLM_BASE_DELAY_SCHEMA_ERROR", "0.5"))
+LLM_BASE_DELAY_AUTH_ERROR:   float = float(os.getenv("LLM_BASE_DELAY_AUTH_ERROR",  "0.0"))
+LLM_BASE_DELAY_UNKNOWN:      float = float(os.getenv("LLM_BASE_DELAY_UNKNOWN",     "1.0"))
+
+# 按错误类型的最大退避延迟（秒）
+LLM_MAX_DELAY_RATE_LIMIT:   float = float(os.getenv("LLM_MAX_DELAY_RATE_LIMIT",   "60.0"))
+LLM_MAX_DELAY_TIMEOUT:      float = float(os.getenv("LLM_MAX_DELAY_TIMEOUT",      "10.0"))
+LLM_MAX_DELAY_SERVER_ERROR: float = float(os.getenv("LLM_MAX_DELAY_SERVER_ERROR", "8.0"))
+LLM_MAX_DELAY_SCHEMA_ERROR: float = float(os.getenv("LLM_MAX_DELAY_SCHEMA_ERROR", "2.0"))
+LLM_MAX_DELAY_AUTH_ERROR:   float = float(os.getenv("LLM_MAX_DELAY_AUTH_ERROR",   "0.0"))
+LLM_MAX_DELAY_UNKNOWN:      float = float(os.getenv("LLM_MAX_DELAY_UNKNOWN",      "5.0"))

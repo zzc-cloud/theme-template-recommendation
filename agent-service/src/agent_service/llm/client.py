@@ -2,10 +2,16 @@
 LLM 客户端
 使用 SiliconFlow 的 OpenAI 兼容格式 API
 支持结构化输出 (with_structured_output) 替代手动 JSON 解析
+内置按错误类型差异化重试机制
 """
 
 import logging
-from typing import Any, Optional, Type
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from enum import Enum
+from typing import Optional, Type
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -45,7 +51,101 @@ def get_llm_client() -> ChatOpenAI:
 
 
 # ─────────────────────────────────────────────
-# 结构化输出调用（核心改进）
+# 错误分类
+# ─────────────────────────────────────────────
+class LLMErrorType(Enum):
+    RATE_LIMIT   = "rate_limit"    # 429 限流 → 可重试，退避更长
+    TIMEOUT      = "timeout"       # 超时 → 可重试
+    SERVER_ERROR = "server_error"  # 5xx → 可重试
+    AUTH_ERROR   = "auth_error"    # 401/403 → 不可重试
+    SCHEMA_ERROR = "schema_error"  # 结构化输出格式错误 → 限1次
+    UNKNOWN      = "unknown"       # 未知 → 限1次
+
+
+def _classify_error(e: Exception) -> LLMErrorType:
+    """将异常分类，决定重试策略"""
+    msg = str(e).lower()
+    if "429" in msg or "rate limit" in msg or "too many" in msg:
+        return LLMErrorType.RATE_LIMIT
+    if "timeout" in msg or "timed out" in msg or "timed-out" in msg:
+        return LLMErrorType.TIMEOUT
+    if any(c in msg for c in ["500", "502", "503", "504"]):
+        return LLMErrorType.SERVER_ERROR
+    if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg:
+        return LLMErrorType.AUTH_ERROR
+    if "validation" in msg or "schema" in msg or "parse" in msg or "json" in msg:
+        return LLMErrorType.SCHEMA_ERROR
+    return LLMErrorType.UNKNOWN
+
+
+def _get_retry_config(error_type: LLMErrorType) -> dict:
+    """从 config 读取指定错误类型的重试配置"""
+    mapping = {
+        LLMErrorType.RATE_LIMIT: {
+            "max_retries": config.LLM_MAX_RETRIES_RATE_LIMIT,
+            "base_delay":  config.LLM_BASE_DELAY_RATE_LIMIT,
+            "max_delay":  config.LLM_MAX_DELAY_RATE_LIMIT,
+        },
+        LLMErrorType.TIMEOUT: {
+            "max_retries": config.LLM_MAX_RETRIES_TIMEOUT,
+            "base_delay":  config.LLM_BASE_DELAY_TIMEOUT,
+            "max_delay":  config.LLM_MAX_DELAY_TIMEOUT,
+        },
+        LLMErrorType.SERVER_ERROR: {
+            "max_retries": config.LLM_MAX_RETRIES_SERVER_ERROR,
+            "base_delay":  config.LLM_BASE_DELAY_SERVER_ERROR,
+            "max_delay":  config.LLM_MAX_DELAY_SERVER_ERROR,
+        },
+        LLMErrorType.SCHEMA_ERROR: {
+            "max_retries": config.LLM_MAX_RETRIES_SCHEMA_ERROR,
+            "base_delay":  config.LLM_BASE_DELAY_SCHEMA_ERROR,
+            "max_delay":  config.LLM_MAX_DELAY_SCHEMA_ERROR,
+        },
+        LLMErrorType.AUTH_ERROR: {
+            "max_retries": config.LLM_MAX_RETRIES_AUTH_ERROR,
+            "base_delay":  config.LLM_BASE_DELAY_AUTH_ERROR,
+            "max_delay":  config.LLM_MAX_DELAY_AUTH_ERROR,
+        },
+        LLMErrorType.UNKNOWN: {
+            "max_retries": config.LLM_MAX_RETRIES_UNKNOWN,
+            "base_delay":  config.LLM_BASE_DELAY_UNKNOWN,
+            "max_delay":  config.LLM_MAX_DELAY_UNKNOWN,
+        },
+    }
+    return mapping[error_type]
+
+
+def _compute_delay(base_delay: float, attempt: int, max_delay: float) -> float:
+    """计算退避延迟：指数退避 + jitter"""
+    delay = min(base_delay * (2 ** attempt), max_delay)
+    jitter = delay * 0.2 * (0.5 - random.random())
+    return max(0, delay + jitter)
+
+
+def _invoke_with_timeout(
+    model: Type[BaseModel],
+    system_prompt: str,
+    user_prompt: str,
+    timeout: float,
+) -> BaseModel:
+    """带超时的单次调用（同步）"""
+    def _do_invoke():
+        client = get_llm_client()
+        structured_client = client.with_structured_output(model)
+        messages = _build_messages(system_prompt, user_prompt)
+        return structured_client.invoke(messages)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_invoke)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            raise TimeoutError(f"LLM调用超时（>{timeout}s）[{model.__name__}]")
+
+
+# ─────────────────────────────────────────────
+# 结构化输出调用（核心改进：带重试）
 # ─────────────────────────────────────────────
 
 def _build_messages(system_prompt: str, user_prompt: str) -> list:
@@ -64,27 +164,55 @@ def invoke_structured(
     """
     调用 LLM 并强制返回结构化数据（Pydantic 模型）
 
+    内部实现：带重试 + 超时控制。
+    - 指数退避 + jitter（避免惊群效应）
+    - 按错误类型差异化重试策略
+    - 超时通过 ThreadPoolExecutor 实现（默认 60 秒）
+
     Args:
         model: Pydantic 模型类
         system_prompt: 系统提示词
         user_prompt: 用户提示词
 
     Returns:
-        Pydantic 模型实例（类型安全，无需解析）
+        Pydantic 模型实例
 
     Raises:
-        RuntimeError: 当 LLM 调用或结构化输出失败时
+        RuntimeError: 当 LLM 调用失败且重试耗尽时
     """
-    client = get_llm_client()
-    structured_client = client.with_structured_output(model)
-    messages = _build_messages(system_prompt, user_prompt)
+    last_error = None
+    timeout = config.LLM_CALL_TIMEOUT_SECONDS
 
-    try:
-        result = structured_client.invoke(messages)
-        return result
-    except Exception as e:
-        logger.error(f"结构化输出调用失败: {model.__name__}, error: {e}")
-        raise RuntimeError(f"结构化输出调用失败 [{model.__name__}]: {e}")
+    for attempt in range(4):  # 最多尝试 4 次（1次正常 + 3次重试）
+        try:
+            result = _invoke_with_timeout(model, system_prompt, user_prompt, timeout)
+            if attempt > 0:
+                logger.info(f"[重试成功] {model.__name__} 第 {attempt + 1} 次尝试成功")
+            return result
+
+        except Exception as e:
+            last_error = e
+            error_type = _classify_error(e)
+            cfg = _get_retry_config(error_type)
+
+            if attempt >= cfg["max_retries"]:
+                logger.error(
+                    f"[重试耗尽] {model.__name__} 错误类型={error_type.value}, "
+                    f"共尝试 {attempt + 1} 次"
+                )
+                break
+
+            sleep_time = _compute_delay(
+                cfg["base_delay"], attempt, cfg["max_delay"]
+            )
+            logger.warning(
+                f"[重试] {model.__name__} 第 {attempt + 1} 次失败 "
+                f"error_type={error_type.value}, "
+                f"{sleep_time:.1f}s 后重试..."
+            )
+            time.sleep(sleep_time)
+
+    raise RuntimeError(f"LLM调用失败（已重试）[{model.__name__}]: {last_error}")
 
 
 # ─────────────────────────────────────────────
@@ -119,7 +247,7 @@ def _build_history_str(conversation_history: list) -> str:
             if dims:
                 lines.append(f"分析维度：{dims}")
 
-    return "\n".join(lines) + "\n"  # 末尾加换行，与后续内容隔开
+    return "\n".join(lines) + "\n"
 
 
 def extract_phrases(
@@ -237,9 +365,9 @@ def analyze_template_usability(
 # 兼容性别名（用于过渡期）
 # ─────────────────────────────────────────────
 
-def invoke_llm_json(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+def invoke_llm_json(system_prompt: str, user_prompt: str) -> dict:
     """
-    [���容] 旧接口，内部不再使用
+    [兼容] 旧接口，内部不再使用
     保留是为了避免其他模块直接调用时报错
     """
     raise NotImplementedError(
