@@ -25,6 +25,9 @@ from .schemas import (
     RecommendedTemplateResponse,
     ResumeRequest,
     SelectedIndicatorResponse,
+    SyncErrorInfo,
+    SyncInterruptInfo,
+    SyncResponse,
     TemplateUsabilityResponse,
 )
 
@@ -381,9 +384,11 @@ async def recommend_stream(req: RecommendRequest):
                 "retrieve_templates",
                 "analyze_templates",
                 "format_output",
+                "generate_summary",
             ]
 
             final_result = None
+            summary_content = None
             # 使用 LangGraph v2 streaming 格式
             async for chunk in agent.astream(
                 initial_state,
@@ -433,48 +438,45 @@ async def recommend_stream(req: RecommendRequest):
                 elif chunk_type == "custom":
                     # 自定义事件（来自节点内的 get_stream_writer()）
                     raw_data = chunk.get("data", {})
-                    markdown_text = translate_event_to_markdown(raw_data)
-                    if markdown_text:
-                        # format_output 完成时，raw_data["markdown"] 包含完整推荐报告
-                        progress_markdown = markdown_text
-                        full_report = raw_data.get("markdown", "") if raw_data.get("stage") == "format_output" else ""
+                    stage = raw_data.get("stage", "")
+
+                    if stage == "summary":
+                        # 独立的自然语言总结事件
+                        summary_content = raw_data.get("content", "")
                         yield {
                             "event": "message",
                             "data": json.dumps({
-                                "event_type": "progress",
-                                "markdown": progress_markdown,
-                                "full_report": full_report,
-                                "raw": raw_data,
+                                "event_type": "summary",
+                                "content": summary_content,
                                 "timestamp": time.time(),
                             }, ensure_ascii=False),
                         }
-
-            execution_time_ms = (time.time() - start_time) * 1000
-
-            # v2 streaming 只返回增量更新，从 Checkpointer 获取完整最终状态
-            if final_result is None:
-                try:
-                    checkpointer = get_checkpointer()
-                    checkpoint = checkpointer.get({"configurable": {"thread_id": request_id}})
-                    if checkpoint and checkpoint.get("channel_values"):
-                        final_result = checkpoint["channel_values"]
-                except Exception as e:
-                    logger.warning(f"无法从 Checkpointer 获取最终状态: {e}")
-
-            response = _build_response(
-                final_result.get("final_output", {}) if final_result else {},
-                execution_time_ms,
-                request_id,
-            )
-
-            yield {
-                "event": "message",
-                "data": json.dumps({
-                    "event_type": "final",
-                    "data": response.model_dump(mode="json"),
-                    "timestamp": time.time(),
-                }, ensure_ascii=False),
-            }
+                    elif stage == "format_output" and raw_data.get("final"):
+                        # format_output 节点推送的 final 事件（快速返回）
+                        final_output = raw_data["final"]
+                        execution_time_ms = (time.time() - start_time) * 1000
+                        response = _build_response(final_output, execution_time_ms, request_id)
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "final",
+                                "data": response.model_dump(mode="json"),
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
+                    else:
+                        # 其他进度事件
+                        markdown_text = translate_event_to_markdown(raw_data)
+                        if markdown_text:
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({
+                                    "event_type": "progress",
+                                    "markdown": markdown_text,
+                                    "raw": raw_data,
+                                    "timestamp": time.time(),
+                                }, ensure_ascii=False),
+                            }
 
         except Exception as e:
             logger.exception(f"[{request_id}] 流式处理失败: {e}")
@@ -521,6 +523,7 @@ async def resume_stream(req: ResumeRequest):
         "retrieve_templates",
         "analyze_templates",
         "format_output",
+        "generate_summary",
     ]
 
     async def event_generator() -> AsyncIterator[dict]:
@@ -599,48 +602,45 @@ async def resume_stream(req: ResumeRequest):
                 elif chunk_type == "custom":
                     # 自定义事件（来自节点内的 get_stream_writer()）
                     raw_data = chunk.get("data", {})
-                    markdown_text = translate_event_to_markdown(raw_data)
-                    if markdown_text:
-                        # format_output 完成时，raw_data["markdown"] 包含完整推荐报告
-                        progress_markdown = markdown_text
-                        full_report = raw_data.get("markdown", "") if raw_data.get("stage") == "format_output" else ""
+                    stage = raw_data.get("stage", "")
+
+                    if stage == "summary":
+                        # 独立的自然语言总结事件
+                        summary_content = raw_data.get("content", "")
                         yield {
                             "event": "message",
                             "data": json.dumps({
-                                "event_type": "progress",
-                                "markdown": progress_markdown,
-                                "full_report": full_report,
-                                "raw": raw_data,
+                                "event_type": "summary",
+                                "content": summary_content,
                                 "timestamp": time.time(),
                             }, ensure_ascii=False),
                         }
-
-            execution_time_ms = (time.time() - start_time) * 1000
-
-            # v2 streaming 只返回增量更新，从 Checkpointer 获取完整最终状态
-            if final_result is None:
-                try:
-                    checkpointer = get_checkpointer()
-                    checkpoint = checkpointer.get({"configurable": {"thread_id": request_id}})
-                    if checkpoint and checkpoint.get("channel_values"):
-                        final_result = checkpoint["channel_values"]
-                except Exception as e:
-                    logger.warning(f"无法从 Checkpointer 获取最终状态: {e}")
-
-            response = _build_response(
-                final_result.get("final_output", {}) if final_result else {},
-                execution_time_ms,
-                request_id,
-            )
-
-            yield {
-                "event": "message",
-                "data": json.dumps({
-                    "event_type": "final",
-                    "data": response.model_dump(mode="json"),
-                    "timestamp": time.time(),
-                }, ensure_ascii=False),
-            }
+                    elif stage == "format_output" and raw_data.get("final"):
+                        # format_output 节点推送的 final 事件（快速返回）
+                        final_output = raw_data["final"]
+                        execution_time_ms = (time.time() - start_time) * 1000
+                        response = _build_response(final_output, execution_time_ms, request_id)
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "event_type": "final",
+                                "data": response.model_dump(mode="json"),
+                                "timestamp": time.time(),
+                            }, ensure_ascii=False),
+                        }
+                    else:
+                        # 其他进度事件
+                        markdown_text = translate_event_to_markdown(raw_data)
+                        if markdown_text:
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({
+                                    "event_type": "progress",
+                                    "markdown": markdown_text,
+                                    "raw": raw_data,
+                                    "timestamp": time.time(),
+                                }, ensure_ascii=False),
+                            }
 
         except Exception as e:
             logger.exception(f"[{request_id}] 恢复流式处理失败: {e}")
@@ -654,6 +654,269 @@ async def resume_stream(req: ResumeRequest):
             }
 
     return EventSourceResponse(event_generator())
+
+
+# ═════════════════════════════════════════════════════════════════
+# 非流式同步端点（适合 CLI / 脚本调用）
+# ═════════════════════════════════════════════════════════════════
+
+
+def _invoke_agent(
+    request_id: str,
+    question: str,
+    top_k_themes: int,
+    top_k_templates: int,
+    context: ConversationContext | None,
+    resume_command: Command | None,
+) -> SyncResponse:
+    """
+    封装 agent.invoke / agent.ainvoke 调用逻辑，统一处理 interrupt 和异常。
+
+    返回 SyncResponse：
+    - status=completed：执行完毕，data 中有 RecommendResponse
+    - status=interrupted：被 interrupt，interrupt 中有 pending_confirmation
+    - status=error：发生异常，error 中有错误信息
+    """
+    import time
+    start_time = time.time()
+
+    # 构造初始状态（与流式端点相同）
+    initial_history = []
+    if context:
+        initial_history.append({
+            "round": 1,
+            "user_question": context.previous_question,
+            "normalized_question": context.previous_normalized_question,
+            "filter_indicators": [
+                {"alias": f.alias, "value": f.value, "indicator_id": "", "type": ""}
+                for f in context.previous_filter_indicators
+            ],
+            "analysis_dimensions": [
+                {"search_term": d, "converged": True, "indicators": []}
+                for d in context.previous_dimensions
+            ],
+        })
+
+    initial_state = {
+        "user_question": question,
+        "top_k_themes": top_k_themes,
+        "top_k_templates": top_k_templates,
+        "extracted_phrases": [],
+        "filter_indicators": [],
+        "analysis_dimensions": [],
+        "normalized_question": "",
+        "search_results": {},
+        "iteration_round": 0,
+        "iteration_log": [],
+        "is_low_confidence": False,
+        "low_confidence_message": "",
+        "low_confidence_suggestions": [],
+        "pending_confirmation": None,
+        "user_confirmation": None,
+        "conversation_history": initial_history,
+        "candidate_themes": [],
+        "recommended_themes": [],
+        "recommended_templates": [],
+        "final_output": {},
+        "execution_time_ms": 0.0,
+        "error": None,
+    }
+
+    agent = agent_graph.get_agent()
+    config = {"configurable": {"thread_id": request_id}}
+
+    try:
+        if resume_command:
+            # resume 场景
+            result = agent.invoke(resume_command, config=config)
+        else:
+            # 首次执行场景
+            result = agent.invoke(initial_state, config=config)
+
+        execution_time_ms = (time.time() - start_time) * 1000
+
+        # 检查是否被 interrupt（通过 checkpoint 判断）
+        checkpointer = get_checkpointer()
+        checkpoint = checkpointer.get(config)
+        pending = None
+        if checkpoint:
+            pending = checkpoint.get("channel_values", {}).get("pending_confirmation")
+
+        if pending:
+            # 被 interrupt（等待用户确认）
+            interrupt_info = SyncInterruptInfo(
+                thread_id=request_id,
+                status="waiting_confirmation",
+                pending_confirmation=pending,
+            )
+            return SyncResponse(
+                status="interrupted",
+                request_id=request_id,
+                execution_time_ms=execution_time_ms,
+                interrupt=interrupt_info,
+            )
+
+        # 正常完成
+        final_output = result.get("final_output", {}) if isinstance(result, dict) else {}
+        response = _build_response(final_output, execution_time_ms, request_id)
+        return SyncResponse(
+            status="completed",
+            request_id=request_id,
+            execution_time_ms=execution_time_ms,
+            data=response,
+        )
+
+    except Exception as e:
+        logger.exception(f"[{request_id}] sync 端点执行失败: {e}")
+        execution_time_ms = (time.time() - start_time) * 1000
+        return SyncResponse(
+            status="error",
+            request_id=request_id,
+            execution_time_ms=execution_time_ms,
+            error=SyncErrorInfo(
+                code="EXECUTION_ERROR",
+                message=f"底层执行失败: {str(e)}",
+            ),
+        )
+
+
+@router.post("/recommend-sync")
+async def recommend_sync(req: RecommendRequest):
+    """
+    非流式同步推荐接口
+
+    与 /recommend（流式 SSE）功能完全相同，但直接返回完整结构化结果。
+    适合 CLI 工具、脚本调用等不需要实时进度反馈的场景。
+
+    **返回格式**：
+    - status=completed：执行完毕，data 中有完整推荐结果
+    - status=interrupted：需要用户确认分析维度，interrupt 中有 pending_confirmation
+      → 调用方应引导用户确认后，调用 /resume-sync 继续
+    - status=error：执行异常
+    """
+    semaphore = get_semaphore()
+    current = get_current_concurrency()
+
+    # 快速拒绝
+    if semaphore.locked() and current >= MAX_CONCURRENT_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "too_many_requests",
+                "message": f"当前并发已达上限 {MAX_CONCURRENT_REQUESTS}，请稍后重试",
+                "current_concurrency": current,
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    try:
+        await asyncio.wait_for(
+            semaphore.acquire(),
+            timeout=CONCURRENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "timeout_waiting",
+                "message": f"等待超过 {CONCURRENT_TIMEOUT_SECONDS}s，请稍后重试",
+                "current_concurrency": get_current_concurrency(),
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    try:
+        logger.info(f"[{req.thread_id}] recommend-sync 请求: {req.question}")
+        response = _invoke_agent(
+            request_id=req.thread_id,
+            question=req.question,
+            top_k_themes=req.top_k_themes,
+            top_k_templates=req.top_k_templates,
+            context=req.context,
+            resume_command=None,
+        )
+        return response
+    finally:
+        semaphore.release()
+
+
+@router.post("/resume-sync")
+async def resume_sync(req: ResumeRequest):
+    """
+    非流式同步恢复接口
+
+    与 /resume（流式 SSE）功能完全相同，但直接返回完整结构化结果。
+    适合 CLI 工具、脚本调用等场景。
+
+    **返回格式**：
+    - status=completed：执行完毕，data 中有完整推荐结果
+    - status=interrupted：再次被 interrupt（通常不应该在 resume 时发生）
+    - status=error：执行异常
+    """
+    semaphore = get_semaphore()
+    current = get_current_concurrency()
+
+    if semaphore.locked() and current >= MAX_CONCURRENT_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "too_many_requests",
+                "message": f"当前并发已达上限 {MAX_CONCURRENT_REQUESTS}，请稍后重试",
+                "current_concurrency": current,
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    try:
+        await asyncio.wait_for(
+            semaphore.acquire(),
+            timeout=CONCURRENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "timeout_waiting",
+                "message": f"等待超过 {CONCURRENT_TIMEOUT_SECONDS}s，请稍后重试",
+                "current_concurrency": get_current_concurrency(),
+                "max_concurrency": MAX_CONCURRENT_REQUESTS,
+            },
+        )
+
+    try:
+        logger.info(f"[{req.thread_id}] resume-sync 请求")
+
+        # 先检查 checkpoint 是否存在
+        checkpointer = get_checkpointer()
+        checkpoint = checkpointer.get({"configurable": {"thread_id": req.thread_id}})
+        if not checkpoint:
+            return SyncResponse(
+                status="error",
+                request_id=req.thread_id,
+                execution_time_ms=0.0,
+                error=SyncErrorInfo(
+                    code="CHECKPOINT_NOT_FOUND",
+                    message="会话已过期或不存在，请重新发起请求",
+                ),
+            )
+
+        resume_command = Command(resume={
+            "confirmed_dimensions": req.confirmed_dimensions,
+            "confirmed_question": req.confirmed_question,
+        })
+
+        response = _invoke_agent(
+            request_id=req.thread_id,
+            question="",  # resume 不需要 question
+            top_k_themes=3,
+            top_k_templates=5,
+            context=None,
+            resume_command=resume_command,
+        )
+        return response
+
+    finally:
+        semaphore.release()
 
 
 @router.get("/debug/checkpoint/{thread_id}")

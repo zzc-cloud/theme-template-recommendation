@@ -332,6 +332,96 @@ def invoke_structured(
 
 
 # ─────────────────────────────────────────────
+# 纯文本输出调用（用于 Markdown 生成等场景）
+# ─────────────────────────────────────────────
+
+def _invoke_text_with_timeout(
+    system_prompt: str,
+    user_prompt: str,
+    timeout: float,
+) -> str:
+    """
+    带超时的单次文本调用（同步）
+
+    与 _invoke_with_timeout 不同，这里直接返回文本内容，不做结构化解析。
+    """
+    def _do_invoke():
+        client = get_llm_client()
+        messages = _build_messages(system_prompt, user_prompt)
+        result = client.invoke(messages)
+        # AIMessage 的 content 属性包含文本内容
+        return result.content
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_invoke)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            raise TimeoutError(f"LLM文本调用超时（>{timeout}s）")
+
+
+def invoke_text(
+    system_prompt: str,
+    user_prompt: str,
+    timeout: Optional[float] = None,
+) -> str:
+    """
+    调用 LLM 并返回纯文本（非结构化输出）
+
+    复用现有的：
+    - 错误分类与重试机制（_classify_error, _get_retry_config）
+    - 超时控制（ThreadPoolExecutor）
+    - 指数退避策略（_compute_delay）
+
+    Args:
+        system_prompt: 系统提示词
+        user_prompt: 用户提示词
+        timeout: 可选超时时间（秒），默认使用 config.LLM_CALL_TIMEOUT_SECONDS
+
+    Returns:
+        str: LLM 生成的文本内容
+
+    Raises:
+        LLMCallError: 当 LLM 调用失败且重试耗尽时
+    """
+    last_error = None
+    if timeout is None:
+        timeout = config.LLM_CALL_TIMEOUT_SECONDS
+
+    for attempt in range(4):  # 最多尝试 4 次（1次正常 + 3次重试）
+        try:
+            result = _invoke_text_with_timeout(system_prompt, user_prompt, timeout)
+            if attempt > 0:
+                logger.info(f"[重试成功] 文本生成 第 {attempt + 1} 次尝试成功")
+            return result
+
+        except Exception as e:
+            last_error = e
+            error_type = _classify_error(e)
+            cfg = _get_retry_config(error_type)
+
+            if attempt >= cfg["max_retries"]:
+                logger.error(
+                    f"[重试耗尽] 文本生成 错误类型={error_type.value}, "
+                    f"共尝试 {attempt + 1} 次"
+                )
+                break
+
+            sleep_time = _compute_delay(
+                cfg["base_delay"], attempt, cfg["max_delay"]
+            )
+            logger.warning(
+                f"[重试] 文本生成 第 {attempt + 1} 次失败 "
+                f"error_type={error_type.value}, "
+                f"{sleep_time:.1f}s 后重试..."
+            )
+            time.sleep(sleep_time)
+
+    raise LLMCallError(f"LLM文本调用失败（已重试）: {last_error}")
+
+
+# ─────────────────────────────────────────────
 # 各阶段专用调用函数
 # ─────────────────────────────────────────────
 

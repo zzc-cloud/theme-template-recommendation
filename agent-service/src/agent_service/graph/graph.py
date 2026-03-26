@@ -19,6 +19,7 @@ from .nodes import (
     complete_indicators,
     extract_phrases,
     format_output,
+    generate_summary,
     judge_themes,
     retrieve_templates,
     wait_for_confirmation,
@@ -73,6 +74,7 @@ def build_agent_graph(
 
     # Finish
     workflow.add_node("format_output", format_output)
+    workflow.add_node("generate_summary", generate_summary)
 
     # ── 添加边 ──
     workflow.add_edge(START, "extract_phrases")
@@ -84,7 +86,8 @@ def build_agent_graph(
     workflow.add_edge("judge_themes", "retrieve_templates")
     workflow.add_edge("retrieve_templates", "analyze_templates")
     workflow.add_edge("analyze_templates", "format_output")
-    workflow.add_edge("format_output", END)
+    workflow.add_edge("format_output", "generate_summary")
+    workflow.add_edge("generate_summary", END)
 
     # ── 编译（可选 Checkpointer） ──
     cp = checkpointer or get_checkpointer()

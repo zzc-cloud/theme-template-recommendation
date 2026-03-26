@@ -3,7 +3,7 @@ API 数据模型
 Pydantic 请求/响应模型
 """
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -161,6 +161,67 @@ class RecommendResponse(BaseModel):
     conversation_round: int = Field(default=1, description="当前对话轮次")
     error: Optional[str] = None
     markdown: str = Field(default="", description="Markdown 格式的人类可读输出")
+
+
+# ─────────────────────────────────────────────
+# 健康检查
+# ─────────────────────────────────────────────
+
+class SyncResponse(BaseModel):
+    """
+    非流式同步响应
+
+    所有非 SSE 的直接调用（CLI、脚本）使用此统一响应格式。
+
+    status 枚举：
+    - completed: 全流程执行完毕，data 中包含完整推荐结果
+    - interrupted: 执行到中途被 interrupt（通常是等待用户确认分析维度），
+                   interrupt 字段包含挂起状态，调用方需要引导用户确认后调用 resume-sync
+    - error: 执行过程中发生异常，error 字段包含错误信息
+    """
+    status: Literal["completed", "interrupted", "error"] = Field(
+        description="执行状态"
+    )
+    request_id: str = Field(description="请求唯一标识")
+    execution_time_ms: float = Field(default=0.0, description="服务端执行耗时（毫秒）")
+
+    # completed 时有
+    data: Optional[RecommendResponse] = Field(
+        default=None,
+        description="完整的推荐结果（status=completed 时有）",
+    )
+
+    # interrupted 时有
+    interrupt: Optional["SyncInterruptInfo"] = Field(
+        default=None,
+        description="中断信息（status=interrupted 时有）",
+    )
+
+    # error 时有
+    error: Optional["SyncErrorInfo"] = Field(
+        default=None,
+        description="错误信息（status=error 时有）",
+    )
+
+
+class SyncInterruptInfo(BaseModel):
+    """中断信息（等待用户确认）"""
+    thread_id: str
+    status: str  # "waiting_confirmation" | "low_confidence"
+    pending_confirmation: dict = Field(
+        default_factory=dict,
+        description="待确认的分析维度信息",
+    )
+    message: str = Field(
+        default="请调用 resume-sync 接口确认分析维度后继续执行",
+        description="提示信息",
+    )
+
+
+class SyncErrorInfo(BaseModel):
+    """错误信息"""
+    code: str = Field(default="UNKNOWN", description="错误码")
+    message: str = Field(default="未知错误", description="错误描述")
 
 
 # ─────────────────────────────────────────────

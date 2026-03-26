@@ -652,14 +652,9 @@ def wait_for_confirmation(state: AgentState) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 def format_output(state: AgentState) -> dict:
-    """整理最终输出"""
+    """整理最终输出（仅结构化数据，markdown 为空，快速返回）"""
     writer = get_stream_writer()
     writer({"stage": "format_output", "step": "generating", "status": "in_progress"})
-
-    # 生成 Markdown 格式的推荐结果
-    markdown_output = _format_markdown_output(state)
-
-    writer({"stage": "format_output", "step": "completed", "status": "done", "markdown": markdown_output})
 
     # 追加本轮对话到历史
     history = list(state.get("conversation_history", []))
@@ -678,6 +673,7 @@ def format_output(state: AgentState) -> dict:
         ],
     })
 
+    # 构建 final_output（仅结构化数据，markdown 为空）
     final_output = {
         "user_question": state["user_question"],
         "normalized_question": state.get("normalized_question", ""),
@@ -715,8 +711,16 @@ def format_output(state: AgentState) -> dict:
             "rounds": state.get("iteration_round", 0),
             "log": state.get("iteration_log", []),
         },
-        "markdown": markdown_output,
+        "markdown": "",  # 为空，快速返回
     }
+
+    # 立即推送 final 事件（不等待 LLM）
+    writer({
+        "stage": "format_output",
+        "step": "completed",
+        "status": "done",
+        "final": final_output
+    })
 
     return {
         "final_output": final_output,
@@ -773,214 +777,247 @@ def _build_analysis_indicators_str(analysis_inds: list) -> str:
     )
 
 
-# 可用性 emoji 映射
+# ═══════════════════════════════════════════════════════════════════════
+# 独立的自然语言总结生成（异步）
+# ═══════════════════════════════════════════════════════════════════════
+
+def generate_summary(state: AgentState) -> dict:
+    """基于 final 结构化数据生成详细文字总结（不调用 LLM）"""
+    writer = get_stream_writer()
+
+    # 获取数据
+    user_question = state.get("user_question", "")
+    normalized = state.get("normalized_question", user_question)
+    themes = state.get("recommended_themes", [])
+    templates = state.get("recommended_templates", [])
+    dimensions = state.get("analysis_dimensions", [])
+    filters = state.get("filter_indicators", [])
+
+    # 直接构建文字总结
+    parts = []
+
+    # 1. 需求概括
+    parts.append(f"根据您的问题「{user_question}」，我为您分析了相关需求。")
+    if normalized and normalized != user_question:
+        parts.append(f"规范化后的分析需求为：{normalized}。")
+
+    # 2. 筛选条件
+    if filters:
+        filter_strs = [f"{f.get('alias', '')}为「{f.get('value', '')}」" for f in filters]
+        parts.append(f"自动识别的筛选条件：{', '.join(filter_strs)}。")
+
+    # 3. 分析维度
+    if dimensions:
+        dim_parts = []
+        for d in dimensions:
+            search_term = d.get('search_term', '')
+            indicators = d.get('indicators', [])
+            if indicators:
+                top_inds = [i.get('alias', '') for i in indicators[:3]]
+                dim_parts.append(f"「{search_term}」（关联指标：{', '.join(top_inds)}）")
+            else:
+                dim_parts.append(f"「{search_term}」")
+        parts.append(f"确认的分析维度包括：{'、'.join(dim_parts)}。")
+
+    # 4. 推荐主题
+    if themes:
+        parts.append("关于主题推荐：")
+        for i, t in enumerate(themes):
+            theme_name = t.get('theme_alias', '')
+            theme_path = t.get('theme_path', '')
+            is_supported = t.get('is_supported', False)
+            reason = t.get('support_reason', '')
+
+            if i == 0:
+                parts.append(f"首选推荐「{theme_name}」主题")
+            else:
+                status = "推荐" if is_supported else "作为备选"
+                parts.append(f"同时{status}「{theme_name}」主题")
+
+            if theme_path:
+                parts.append(f"，位于{theme_path}")
+
+            if reason:
+                parts.append(f"。推荐理由：{reason}")
+
+            # 选中指标
+            filter_inds = t.get('selected_filter_indicators', [])
+            analysis_inds = t.get('selected_analysis_indicators', [])
+
+            if filter_inds:
+                aliases = [ind.get('alias', '') for ind in filter_inds]
+                parts.append(f"。该主题包含筛选指标：{', '.join(aliases)}")
+
+            if analysis_inds:
+                aliases = [ind.get('alias', '') for ind in analysis_inds[:5]]
+                parts.append(f"；分析指标：{', '.join(aliases)}")
+
+            parts.append("。")
+
+    # 5. 推荐模板
+    if templates:
+        parts.append("关于模板推荐：")
+        for t in templates:
+            template_name = t.get('template_alias', '')
+            coverage = t.get('coverage_ratio', 0) * 100
+            usage = t.get('usage_count', 0)
+            usability = t.get('usability', {})
+            usability_summary = usability.get('usability_summary', '')
+
+            parts.append(f"「{template_name}」模板（覆盖率 {coverage:.0f}%，使用 {usage} 次）")
+
+            if usability_summary:
+                parts.append(f"，{usability_summary}")
+
+            # 缺口说明
+            missing = usability.get('missing_indicator_analysis', [])
+            if missing:
+                missing_strs = []
+                for m in missing[:2]:
+                    alias = m.get('indicator_alias', '')
+                    importance = m.get('importance', '')
+                    if importance:
+                        missing_strs.append(f"{alias}（{importance}）")
+                    else:
+                        missing_strs.append(alias)
+                parts.append(f"。缺失指标：{', '.join(missing_strs)}")
+
+            parts.append("。")
+    else:
+        parts.append("暂未找到匹配度较高的模板，您可以直接使用推荐的主题进行手动配置。")
+
+    # 6. 下一步建议
+    if themes:
+        parts.append(f"建议您优先使用「{themes[0].get('theme_alias', '')}」主题进行分析，")
+        if templates:
+            parts.append(f"或直接使用「{templates[0].get('template_alias', '')}」模板快速开始。")
+        else:
+            parts.append("在主题中勾选需要的指标后开始分析。")
+
+    summary = "".join(parts)
+    writer({"stage": "summary", "content": summary})
+    return {}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LLM Markdown 生成辅助函数
+# ═══════════════════════════════════════════════════════════════════════
+
+def _build_filter_indicators_for_prompt(filter_indicators: list) -> str:
+    """构建筛选条件的提示词字符串"""
+    if not filter_indicators:
+        return "（无自动识别的筛选条件）"
+
+    lines = []
+    for f in filter_indicators:
+        alias = f.get("alias", "")
+        value = f.get("value", "")
+        lines.append(f"- {alias} = \"{value}\"")
+    return "\n".join(lines)
+
+
+def _build_analysis_dimensions_for_prompt(dimensions: list) -> str:
+    """构建分析维度的提示词字符串"""
+    if not dimensions:
+        return "（无分析维度）"
+
+    lines = []
+    for d in dimensions:
+        search_term = d.get("search_term", "")
+        indicators = d.get("indicators", [])
+        top_aliases = [i.get("alias", "") for i in indicators[:5]]
+        lines.append(f"- 「{search_term}」")
+        if top_aliases:
+            lines.append(f"  关联指标：{'、'.join(top_aliases)}")
+    return "\n".join(lines)
+
+
+def _build_themes_for_prompt(themes: list) -> str:
+    """构建推荐主题的提示词字符串（简洁版）"""
+    if not themes:
+        return "无"
+
+    lines = []
+    for i, t in enumerate(themes[:2]):  # 只取前2个
+        theme_name = t.get('theme_alias', '')
+        theme_path = t.get('theme_path', '')
+        reason = t.get('support_reason', '')
+
+        # 只保留核心信息
+        lines.append(f"{i+1}. {theme_name}")
+        if theme_path:
+            lines.append(f"   路径: {theme_path}")
+        if reason and len(reason) < 100:
+            lines.append(f"   理由: {reason}")
+
+    return "\n".join(lines)
+
+
+def _build_templates_for_prompt(templates: list) -> str:
+    """构建推荐模板的提示词字符串（简洁版）"""
+    if not templates:
+        return "无"
+    lines = []
+    for t in templates[:2]:  # 只取前2个
+        coverage = t.get("coverage_ratio", 0)
+        usage = t.get("usage_count", 0)
+        summary = t.get("usability", {}).get("usability_summary", "")
+        lines.append(f"- {t.get('template_alias', '')}（热度{usage}, 覆盖率{coverage*100:.0f}%）")
+        if summary:
+            lines.append(f"  {summary}")
+    return "\n".join(lines)
+
+
+def _fallback_markdown_output(state: AgentState) -> str:
+    """LLM 失败时的兜底 Markdown 模板（简化版）"""
+    user_question = state.get("user_question", "")
+    normalized_question = state.get("normalized_question", user_question)
+
+    lines = [
+        "# 主题 & 模板推荐",
+        "",
+        f"**用户问题**：{user_question}",
+        "",
+        f"**规范化需求**：{normalized_question}",
+        "",
+    ]
+
+    # 筛选条件
+    filter_inds = state.get("filter_indicators", [])
+    if filter_inds:
+        lines.append("## 筛选条件")
+        for f in filter_inds:
+            lines.append(f"- {f.get('alias', '')} = \"{f.get('value', '')}\"")
+        lines.append("")
+
+    # 推荐主题
+    themes = state.get("recommended_themes", [])
+    if themes:
+        lines.append("## 推荐主题")
+        for t in themes:
+            if t.get("is_supported"):
+                lines.append(f"- **{t.get('theme_alias', '')}**")
+                lines.append(f"  路径：{t.get('theme_path', '')}")
+        lines.append("")
+
+    # 推荐模板
+    templates = state.get("recommended_templates", [])
+    if templates:
+        lines.append("## 推荐模板")
+        for t in templates:
+            coverage = t.get("coverage_ratio", 0)
+            lines.append(f"- **{t.get('template_alias', '')}** (覆盖率: {coverage * 100:.0f}%)")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# 可用性 emoji 映射（保留，可能在其他地方使用）
 USABILITY_EMOJI = {
     "可直接使用": "✅",
     "补充后可用": "🔧",
     "缺口较大建议谨慎": "⚠️",
 }
-
-
-def _format_markdown_output(state: AgentState) -> str:
-    """生成 Markdown 格式的推荐结果（对齐 SKILL.md 输出规范）"""
-    lines = []
-    user_question = state.get("user_question", "")
-    normalized_question = state.get("normalized_question", "")
-    filter_indicators = state.get("filter_indicators", [])
-    analysis_dimensions = state.get("analysis_dimensions", [])
-    recommended_themes = state.get("recommended_themes", [])
-    recommended_templates = state.get("recommended_templates", [])
-
-    # ── 标题框 ──────────────────────────────────────────────
-    lines += [
-        "╔═══════════════════════════════════════════════════════════════════╗",
-        "║                      主题&模板推荐                                  ║",
-        "╠═══════════════════════════════════════════════════════════════════╣",
-        f'║ 用户问题: "{user_question}"',
-        "╚═══════════════════════════════════════════════════════════════════╝",
-        "",
-        "━" * 67,
-        "",
-    ]
-
-    # ── 需求澄清区块 ─────────────────────────────────────────
-    lines += [
-        "┌───────────────────────────────────────────────────────────────────┐",
-        "│ 📋 需求澄清 📋                                                      │",
-        "├───────────────────────────────────────────────────────────────────┤",
-        "│                                                                   │",
-    ]
-    if normalized_question:
-        lines.append(f'│ 规范化需求（已确认）: "{normalized_question}"')
-        lines.append("│")
-
-    if filter_indicators:
-        lines.append("│ 筛选条件（自动应用）：")
-        for f in filter_indicators:
-            alias = f.get("alias", "")
-            value = f.get("value", "")
-            lines.append(f'│   🏦 {alias} = "{value}"')
-        lines.append("│")
-
-    if analysis_dimensions:
-        lines.append(f"│ 确认的分析维度 ({len(analysis_dimensions)}):")
-        for dim in analysis_dimensions:
-            search_term = dim.get("search_term", "")
-            indicators = dim.get("indicators", [])
-            top_aliases = [i.get("alias", "") for i in indicators[:5]]
-            lines.append(f"│   ☑ {search_term}")
-            if top_aliases:
-                lines.append(f"│     └ 关联指标：{'、'.join(top_aliases)}")
-        lines.append("│")
-
-    lines += [
-        "└───────────────────────────────────────────────────────────────────┘",
-        "",
-        "━" * 67,
-        "",
-    ]
-
-    # ── 推荐主题区块 ─────────────────────────────────────────
-    lines += [
-        "┌───────────────────────────────────────────────────────────────────┐",
-        "│ 📁 推荐主题 📁                                                      │",
-        "├───────────────────────────────────────────────────────────────────┤",
-        "│                                                                   │",
-    ]
-
-    medals = ["🥇 首选主题", "🥈 备选主题", "🥉 备选主题"]
-    for i, theme in enumerate(recommended_themes):
-        medal = medals[i] if i < len(medals) else f"  备选主题 {i+1}"
-        theme_name = theme.get("theme_alias", "")
-        theme_path = theme.get("theme_path", "")
-        is_supported = theme.get("is_supported", True)
-
-        if not is_supported:
-            reason = theme.get("support_reason", "")
-            lines.append(f"│ {medal}: {theme_name}")
-            lines.append(f"│    路径: {theme_path}")
-            lines.append(f"│    ⚠️ 不推荐：{reason}")
-            lines.append("│")
-            continue
-
-        lines.append(f"│ {medal}: {theme_name}")
-        lines.append(f"│    路径: {theme_path}")
-        lines.append("│")
-
-        filter_inds = theme.get("selected_filter_indicators", [])
-        if filter_inds:
-            lines.append("│    🔘 筛选指标:")
-            for ind in filter_inds:
-                lines.append(f"│    ☑ {ind.get('alias', '')}")
-            lines.append("│")
-
-        analysis_inds = theme.get("selected_analysis_indicators", [])
-        if analysis_inds:
-            lines.append("│    📊 分析指标（覆盖用户问题）:")
-            for ind in analysis_inds:
-                alias = ind.get("alias", "")
-                reason = ind.get("reason", "")
-                lines.append(f"│    ☑ {alias}")
-                if reason:
-                    lines.append(f"│      💡 {reason}")
-            lines.append("│")
-
-    if not recommended_themes:
-        lines.append("│ 未找到匹配的主题")
-        lines.append("│")
-
-    lines += [
-        "└───────────────────────────────────────────────────────────────────┘",
-        "",
-        "━" * 67,
-        "",
-    ]
-
-    # ── 模板推荐区块 ─────────────────────────────────────────
-    has_qualified = any(
-        t.get("coverage_ratio", 0) >= 0.8
-        for t in recommended_templates
-    )
-
-    lines += [
-        "┌───────────────────────────────────────────────────────────────────┐",
-    ]
-    if has_qualified:
-        lines.append("│ 📄 模板推荐结果（匹配度 ≥ 80%，按覆盖率排序） 📄                         │")
-    else:
-        lines.append("│ 📄 模板推荐结果 📄                                                   │")
-    lines += [
-        "├───────────────────────────────────────────────────────────────────┤",
-        "│                                                                   │",
-    ]
-
-    if not recommended_templates:
-        lines.append("│ 未找到匹配的模板")
-        lines.append("│")
-    elif not has_qualified and recommended_templates:
-        lines += [
-            "│ ⚠️ 未找到覆盖率 ≥ 80% 的达标模板 ⚠️",
-            "│",
-            "│ 以下为参考推荐（按覆盖率和热度排序）：",
-            "│",
-        ]
-
-    for i, t in enumerate(recommended_templates, 1):
-        usability = t.get("usability", {})
-        overall = usability.get("overall_usability", "")
-        emoji = USABILITY_EMOJI.get(overall, "📄")
-        coverage_ratio = t.get("coverage_ratio", 0)
-        coverage_count = t.get("coverage_count", 0)
-        total_count = t.get("total_count", 0)
-        usage_count = t.get("usage_count", 0)
-        template_alias = t.get("template_alias", "")
-        template_id = t.get("template_id", "")
-        usability_summary = usability.get("usability_summary", "")
-        missing_analyses = usability.get("missing_indicator_analysis", [])
-        recommend_reason = t.get("recommend_reason", "")
-
-        # 降级推荐时显示推荐理由
-        fallback_reason = t.get("fallback_reason", "")
-        if fallback_reason and not recommend_reason:
-            recommend_reason = fallback_reason
-
-        lines.append(f"│ {i}. {emoji} {template_alias}")
-        lines.append(f"│    ID: {template_id}")
-        # 优先使用 coverage_count/total_count，否则回退到 coverage_ratio
-        if coverage_count and total_count:
-            lines.append(
-                f"│    热度: 🔥 {usage_count} 次使用 | "
-                f"覆盖率: {coverage_count}/{total_count} ({coverage_ratio * 100:.0f}%)"
-            )
-        else:
-            lines.append(
-                f"│    热度: 🔥 {usage_count} 次使用 | "
-                f"覆盖率: {coverage_ratio * 100:.0f}%"
-            )
-        if recommend_reason:
-            lines.append(f"│    推荐理由: {recommend_reason}")
-        if usability_summary:
-            lines.append(f"│    可用性: {usability_summary}")
-
-        # 缺口说明
-        core_missing = [
-            m for m in missing_analyses
-            if m.get("importance") in ["核心", "辅助"]
-        ]
-        if core_missing:
-            lines.append("│    缺口说明:")
-            for m in core_missing:
-                alias = m.get("indicator_alias", "")
-                impact = m.get("impact", "")
-                suggestion = m.get("supplement_suggestion", "")
-                lines.append(f"│             缺少「{alias}」，{impact}")
-                if suggestion and suggestion != "无":
-                    lines.append(f"│             {suggestion}")
-        lines.append("│")
-
-    lines.append("└───────────────────────────────────────────────────────────────────┘")
-
-    return "\n".join(lines)
 
 
 def _build_template_indicators_str(template_inds: list) -> str:
