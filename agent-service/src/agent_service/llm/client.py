@@ -5,6 +5,7 @@ LLM 客户端
 内置按错误类型差异化重试机制
 """
 
+import json
 import logging
 import random
 import time
@@ -33,6 +34,87 @@ logger = logging.getLogger(__name__)
 class LLMCallError(RuntimeError):
     """底层 LLM 调用失败（含重试耗尽），统一向上抛出"""
     pass
+
+
+# ─────────────────────────────────────────────
+# JSON 修复工具
+# ─────────────────────────────────────────────
+def _fix_malformed_json(raw_str: str) -> str:
+    """
+    尝试修复 LLM 返回的格式错误 JSON
+
+    常见问题：
+    1. 双重编码：'{"{ "key": "value" }"}' → '{ "key": "value" }'
+    2. 多余的引号包裹：'"{"key": "value"}"' → '{"key": "value"}'
+    3. Markdown 代码块：'```json\\n{...}\\n```' → '{...}'
+    """
+    if not raw_str:
+        return raw_str
+
+    s = raw_str.strip()
+
+    # 1. 移除 markdown 代码块包裹
+    if s.startswith("```"):
+        lines = s.split("\n")
+        # 移除首行（```json 或 ```）
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        # 移除尾行（```）
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+
+    # 2. 递归解包多层引号包裹
+    # 处理双重编码和单层引号包裹的混合情况
+    max_iterations = 5  # 防止无限循环
+    for _ in range(max_iterations):
+        # 双重编码：'{"{...}"}' 模式
+        if s.startswith('{"{') and s.endswith('"}'):
+            inner = s[2:-2]  # 移除 {" 和 "}
+            if inner.startswith('"') and inner.endswith('"'):
+                inner = inner[1:-1]
+            s = inner.replace('\\"', '"')
+            continue
+        # 单层引号包裹：'"{...}"' 模式
+        if s.startswith('"{"') and s.endswith('}"'):
+            s = s[1:-1]
+            continue
+        # 不再需要处理，退出循环
+        break
+
+    return s
+
+
+def _try_parse_json_with_fix(raw_str: str, model: Type[BaseModel]) -> Optional[BaseModel]:
+    """
+    尝试解析 JSON，失败时自动修复后重试
+
+    Args:
+        raw_str: LLM 返回的原始字符串
+        model: 目标 Pydantic 模型
+
+    Returns:
+        解析成功的模型实例，或 None（解析失败）
+    """
+    # 第一次尝试：直接解析
+    try:
+        data = json.loads(raw_str)
+        return model.model_validate(data)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.debug(f"[JSON解析] 首次解析失败: {e}")
+
+    # 第二次尝试：修复后解析
+    try:
+        fixed_str = _fix_malformed_json(raw_str)
+        if fixed_str != raw_str:
+            logger.info(f"[JSON修复] 原始: {raw_str[:100]}... → 修复后: {fixed_str[:100]}...")
+            data = json.loads(fixed_str)
+            return model.model_validate(data)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.debug(f"[JSON解析] 修复后解析仍失败: {e}")
+
+    return None
+
 
 # ─────────────────────────────────────────────
 # 全局 LLM 客户端（延迟初始化）
@@ -133,12 +215,41 @@ def _invoke_with_timeout(
     user_prompt: str,
     timeout: float,
 ) -> BaseModel:
-    """带超时的单次调用（同步）"""
+    """
+    带超时的单次调用（同步）
+
+    使用 include_raw=True 获取原始响应，以便在解析失败时尝试修复 JSON
+    """
     def _do_invoke():
         client = get_llm_client()
-        structured_client = client.with_structured_output(model)
+        # 使用 include_raw=True 来获取原始响应
+        structured_client = client.with_structured_output(model, include_raw=True)
         messages = _build_messages(system_prompt, user_prompt)
-        return structured_client.invoke(messages)
+        result = structured_client.invoke(messages)
+
+        # 如果解析成功，直接返回
+        if result.get("parsed") is not None:
+            return result["parsed"]
+
+        # 如果解析失败但有原始响应，尝试修复 JSON
+        raw = result.get("raw")
+        parsing_error = result.get("parsing_error")
+        if raw is not None and parsing_error is not None:
+            raw_content = raw.content if hasattr(raw, 'content') else str(raw)
+            logger.warning(f"[JSON解析失败] 尝试修复: {raw_content[:200]}...")
+
+            # 尝试修复并重新解析
+            parsed = _try_parse_json_with_fix(raw_content, model)
+            if parsed is not None:
+                logger.info(f"[JSON修复成功] {model.__name__}")
+                return parsed
+
+        # 如果修复也失败，抛出原始错误
+        if parsing_error:
+            raise parsing_error
+
+        # 兜底：返回解析结果（可能是 None）
+        return result.get("parsed")
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_do_invoke)

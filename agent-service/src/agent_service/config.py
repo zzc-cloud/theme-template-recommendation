@@ -64,9 +64,9 @@ EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
 # LLM 模型（用于推理，SiliconFlow）
 LLM_MODEL: str = os.getenv(
     "LLM_MODEL",
-    "Pro/zai-org/GLM-5",
+    "Pro/zai-org/GLM-4.7",
 )
-LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 
 

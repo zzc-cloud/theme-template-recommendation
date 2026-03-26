@@ -119,7 +119,7 @@ def aggregate_themes_from_indicators(
                    theme.id as theme_id,
                    theme.alias as theme_alias,
                    theme.level as theme_level,
-                   " > ".join(path_aliases) as theme_path
+                   reduce(s = "", x IN path_aliases | CASE WHEN s = "" THEN x ELSE s + " > " + x END) as theme_path
             """
             result = session.run(
                 cypher,

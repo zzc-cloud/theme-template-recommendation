@@ -653,8 +653,13 @@ def wait_for_confirmation(state: AgentState) -> dict:
 
 def format_output(state: AgentState) -> dict:
     """整理最终输出"""
+    writer = get_stream_writer()
+    writer({"stage": "format_output", "step": "generating", "status": "in_progress"})
+
     # 生成 Markdown 格式的推荐结果
     markdown_output = _format_markdown_output(state)
+
+    writer({"stage": "format_output", "step": "completed", "status": "done", "markdown": markdown_output})
 
     # 追加本轮对话到历史
     history = list(state.get("conversation_history", []))

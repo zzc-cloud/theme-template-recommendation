@@ -134,6 +134,14 @@ def translate_event_to_markdown(data: dict) -> str | None:
         if step == "completed":
             return "│ ✅ 模板分析完成\n└─────────────────────────────────────────"
 
+    # ── 阶段 3 输出格式化 ──
+    if stage == "format_output":
+        if step == "generating":
+            return "\n┌─────────────────────────────────────────\n│ **[3] 生成推荐结果报告**..."
+        if step == "completed":
+            # 完整的 Markdown 推荐报告已在 data["markdown"] 中，由 SSE 路由直接透传
+            return "│ ✅ 推荐结果生成完成"
+
     return None  # 不需要翻译的事件
 
 
@@ -427,11 +435,15 @@ async def recommend_stream(req: RecommendRequest):
                     raw_data = chunk.get("data", {})
                     markdown_text = translate_event_to_markdown(raw_data)
                     if markdown_text:
+                        # format_output 完成时，raw_data["markdown"] 包含完整推荐报告
+                        progress_markdown = markdown_text
+                        full_report = raw_data.get("markdown", "") if raw_data.get("stage") == "format_output" else ""
                         yield {
                             "event": "message",
                             "data": json.dumps({
                                 "event_type": "progress",
-                                "markdown": markdown_text,
+                                "markdown": progress_markdown,
+                                "full_report": full_report,
                                 "raw": raw_data,
                                 "timestamp": time.time(),
                             }, ensure_ascii=False),
@@ -516,6 +528,23 @@ async def resume_stream(req: ResumeRequest):
         agent = agent_graph.get_agent()
         config = {"configurable": {"thread_id": request_id}}
 
+        # 先检查 checkpoint 是否存在
+        checkpointer = get_checkpointer()
+        checkpoint = checkpointer.get(config)
+
+        if not checkpoint:
+            logger.error(f"[{request_id}] Checkpoint 不存在，无法恢复")
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "event_type": "error",
+                    "message": "会话已过期或不存在，请重新发起请求",
+                    "error_code": "CHECKPOINT_NOT_FOUND",
+                    "timestamp": time.time(),
+                }, ensure_ascii=False),
+            }
+            return
+
         # 构造 Command，将用户确认结果注入 interrupt
         resume_command = Command(resume={
             "confirmed_dimensions": req.confirmed_dimensions,
@@ -572,11 +601,15 @@ async def resume_stream(req: ResumeRequest):
                     raw_data = chunk.get("data", {})
                     markdown_text = translate_event_to_markdown(raw_data)
                     if markdown_text:
+                        # format_output 完成时，raw_data["markdown"] 包含完整推荐报告
+                        progress_markdown = markdown_text
+                        full_report = raw_data.get("markdown", "") if raw_data.get("stage") == "format_output" else ""
                         yield {
                             "event": "message",
                             "data": json.dumps({
                                 "event_type": "progress",
-                                "markdown": markdown_text,
+                                "markdown": progress_markdown,
+                                "full_report": full_report,
                                 "raw": raw_data,
                                 "timestamp": time.time(),
                             }, ensure_ascii=False),
@@ -621,3 +654,35 @@ async def resume_stream(req: ResumeRequest):
             }
 
     return EventSourceResponse(event_generator())
+
+
+@router.get("/debug/checkpoint/{thread_id}")
+async def debug_checkpoint(thread_id: str):
+    """调试端点：查看指定 thread_id 的 checkpoint 状态"""
+    import json
+
+    checkpointer = get_checkpointer()
+    config = {"configurable": {"thread_id": thread_id}}
+    checkpoint = checkpointer.get(config)
+
+    if not checkpoint:
+        return {"exists": False, "thread_id": thread_id}
+
+    # 返回完整 checkpoint 结构
+    result = {
+        "exists": True,
+        "thread_id": thread_id,
+        "checkpoint_keys": list(checkpoint.keys()),
+    }
+
+    # 检查 channel_values 中的关键字段
+    channel_values = checkpoint.get("channel_values", {})
+    result["channel_values_keys"] = list(channel_values.keys()) if channel_values else []
+    result["pending_confirmation"] = channel_values.get("pending_confirmation")
+    result["user_question"] = channel_values.get("user_question", "")[:100] if channel_values.get("user_question") else None
+
+    # 检查 pending_sends（interrupt 信息可能在这里）
+    result["pending_sends"] = checkpoint.get("pending_sends", [])
+    result["pending_tasks"] = checkpoint.get("pending_tasks", [])
+
+    return result
