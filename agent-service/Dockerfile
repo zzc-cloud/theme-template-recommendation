@@ -33,6 +33,8 @@ ARG TARGETARCH
 RUN pip uninstall numpy -y \
     && if [ "$TARGETARCH" = "amd64" ]; then \
          echo ">>> 编译 x86-64 通用版 numpy" && \
+         NPY_BASELINE_OPTIMIZATION="NONE" \
+         NPY_DISPATCH_OPTIMIZATION="NONE" \
          CFLAGS="-march=x86-64 -mtune=generic" \
          CXXFLAGS="-march=x86-64 -mtune=generic" \
          pip install --no-cache-dir numpy --no-binary numpy; \

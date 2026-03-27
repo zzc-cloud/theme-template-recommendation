@@ -128,7 +128,7 @@ def get_llm_client() -> ChatOpenAI:
     if _llm_client is None:
         _llm_client = ChatOpenAI(
             model=config.LLM_MODEL,
-            api_key=config.SILICONFLOW_API_KEY,
+            api_key=config.SILICONFLOW_LLM_API_KEY,
             base_url=config.SILICONFLOW_BASE_URL,
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,

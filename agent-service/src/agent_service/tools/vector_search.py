@@ -71,13 +71,13 @@ def get_embedding(text: str) -> list[float]:
 
 def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[float]]:
     """批量获取文本向量"""
-    if not config.SILICONFLOW_API_KEY:
+    if not config.SILICONFLOW_EMBEDDING_API_KEY:
         raise EnvironmentError(
-            "未设置 SILICONFLOW_API_KEY，请检查环境变量配置"
+            "未设置 SILICONFLOW_EMBEDDING_API_KEY，请检查环境变量配置"
         )
 
     headers = {
-        "Authorization": f"Bearer {config.SILICONFLOW_API_KEY}",
+        "Authorization": f"Bearer {config.SILICONFLOW_EMBEDDING_API_KEY}",
         "Content-Type": "application/json",
     }
 

@@ -1,0 +1,93 @@
+# ──────────��──────────────────────────────────
+# Theme Template Recommendation - All-in-One
+# Agent Service + Neo4j 单容器部署
+# ─────────────────────────────────────────────
+
+FROM neo4j:5.25.0 AS neo4j-base
+
+# ─────────────────────────────────────────────
+# Stage 2: 合并 Python 环境
+# ─────────────────────────────────────────────
+FROM python:3.11-slim
+
+# 安装系统依赖 + Neo4j 运行时依赖（Java）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    build-essential \
+    openjdk-17-jre-headless \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置 Java 环境变量
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="$JAVA_HOME/bin:$PATH"
+
+WORKDIR /app
+
+# ─────────────────────────────────────────────
+# 安装 Python 依赖
+# ─────────────────────────────────────────────
+COPY src/agent_service/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ─────────────────────────────────────────────
+# 复制应用代码
+# ─────────────────────────────────────────────
+COPY src/ ./src/
+
+# ─────────────────────────────────────────────
+# 安装 Neo4j（从官方镜像复制）
+# ─────────────────────────────────────────────
+# 复制 Neo4j 二进制文件和默认配置
+COPY --from=neo4j:5.25.0 /var/lib/neo4j /var/lib/neo4j
+COPY --from=neo4j:5.25.0 /var/log/neo4j /var/log/neo4j
+COPY --from=neo4j:5.25.0 /etc/neo4j /etc/neo4j
+
+# 设置 Neo4j 环境变量
+ENV NEO4J_HOME=/var/lib/neo4j
+ENV PATH="${NEO4J_HOME}/bin:${PATH}"
+
+# 创建 Neo4j 数据目录
+RUN mkdir -p /data/neo4j /var/lib/neo4j/data /var/log/neo4j /var/lib/neo4j/import && \
+    chown -R root:root /var/lib/neo4j /var/log/neo4j /etc/neo4j /data
+
+# ─────────────────────────────────────────────
+# 复制 Chroma 向量数据（构建时注入）
+# ─────────────────────────────────────────────
+# 数据将在运行时通过挂载卷或构建时复制
+# RUN mkdir -p /app/chroma
+
+# ─────────────────────────────────────────────
+# Supervisor 配置（管理多进程）
+# ─────────────────────────────────────────────
+RUN mkdir -p /var/log/supervisor
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# ─────────────────────────────────────────────
+# 环境变量
+# ─────────────────────────────────────────────
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+ENV NEO4J_URI=bolt://localhost:7687
+ENV NEO4J_USER=neo4j
+ENV NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+
+# ─────────────────────────────────────────────
+# 端口
+# ─────────────────────────────────────────────
+# 8000: Agent Service API
+# 7474: Neo4j HTTP（可选，调试用）
+# 7687: Neo4j Bolt（内部通信）
+EXPOSE 8000 7474 7687
+
+# ─────────────────────────────────────────────
+# 健康检查
+# ─────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# ─────────────────────────────────────────────
+# 启动命令
+# ─────────────────────────────────────────────
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

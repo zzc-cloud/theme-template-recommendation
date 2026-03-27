@@ -35,16 +35,20 @@ else:
 # ─────────────────────────────────────────────
 NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "yyzzc87275478")
 
 
 # ─────────────────────────────────────────────
-# SiliconFlow API 配置（用于向量嵌入 + LLM 推理）
+# SiliconFlow API 配置（分离）
 # ─────────────────────────────────────────────
-SILICONFLOW_API_KEY: str = os.getenv(
-    "SILICONFLOW_API_KEY",
-    os.getenv("OPENAI_API_KEY", ""),
-)
+
+# Embedding API Key（用于向量搜索）
+SILICONFLOW_EMBEDDING_API_KEY: str = os.getenv("SILICONFLOW_EMBEDDING_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+
+# LLM API Key（用于大模型推理）
+SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+
+# API 地址（通常保持不变）
 SILICONFLOW_BASE_URL: str = os.getenv(
     "SILICONFLOW_BASE_URL",
     "https://api.siliconflow.cn/v1",
