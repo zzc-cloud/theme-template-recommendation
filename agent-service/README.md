@@ -329,7 +329,7 @@ data: {"event_type": "final", "data": {...}, "timestamp": 1710000005.0}
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `SILICONFLOW_BASE_URL` | `https://api.siliconflow.cn/v1` | SiliconFlow API 地址 |
-| `LLM_MODEL` | `Pro/zai-org/GLM-5` | LLM 模型名称 |
+| `LLM_MODEL` | `Pro/zai-org/` | LLM 模型名称（代码默认值） |
 | `LLM_TEMPERATURE` | 0.7 | LLM 温度参数 |
 | `LLM_MAX_TOKENS` | 4096 | LLM 最大 token 数 |
 | `EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-8B` | Embedding 模型名称 |
