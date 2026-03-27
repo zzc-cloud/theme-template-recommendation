@@ -89,7 +89,8 @@ NEO4J_PASSWORD=your_secure_password_here
 # SiliconFlow API（必需）
 SILICONFLOW_API_KEY=sk-your-api-key-here
 
-# LLM 模型（⚠️ 必填，不可依赖默认值）
+# LLM 模型（代码默认值：Pro/zai-org/
+# 可根据实际需要修改
 LLM_MODEL=Pro/zai-org/GLM-5
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
@@ -171,7 +172,8 @@ NEO4J_PASSWORD=your_neo4j_password
 # SiliconFlow API（必需）
 SILICONFLOW_API_KEY=sk-your-api-key-here
 
-# LLM 模型（⚠️ 必填，不可依赖默认值）
+# LLM 模型（代码默认值：Pro/zai-org/
+# 可根据实际需要修改
 LLM_MODEL=Pro/zai-org/GLM-5
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
