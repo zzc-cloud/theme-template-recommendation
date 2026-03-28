@@ -14,7 +14,7 @@ from typing import Dict, Any, List
 from pathlib import Path
 import sys
 
-# 添加脚���目录到路径
+# 添加脚本目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import MYSQL_CONFIG, SOURCE_TABLES, ONTOLOGY_RESTYPES, ENTRY_NODE_ID
