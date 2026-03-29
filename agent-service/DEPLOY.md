@@ -33,10 +33,20 @@
 | 依赖 | 版本 | 说明 | 必需 |
 |------|------|------|------|
 | Neo4j | 5.x | 存储魔数师主题/模板/指标本体 | 必需 |
-| Chroma | 0.5.x | 存储指标向量（用于语义搜索） | 必需 |
+| Chroma | 0.4.x | 存储指标向量（用于语义搜索） | 必需 |
 | SiliconFlow API | - | LLM 推理 + 向量嵌入 | 必需 |
 | Docker | 24.x+ | 容器化部署 | 方式二、三 |
 | Docker Compose | 2.x+ | 编排多容器 | 方式一 |
+
+### 旧 CPU 兼容说明
+
+> ⚠️ **重要**：NumPy 1.25+ 默认启用 x86-64-v2 指令集优化，部分旧 Linux 服务器 CPU 不支持此指令集，导致运行时出现 `RuntimeError: NumPy was built with baseline optimizations: (X86_V2) but your machine doesn't support: (X86_V2)` 错误。
+
+**解决方案**：Docker 镜像构建时会自动检测平台：
+- **amd64 平台**：从源码编译 NumPy，使用通用 x86-64 指令集（`-march=x86-64 -mtune=generic`），兼容所有 x86-64 CPU
+- **arm64 平台**：让编译器自动适配
+
+这确保了打包后的镜像在任意 Linux amd64 服务器上都能正常运行。
 
 ### 网络架构
 
@@ -116,7 +126,13 @@ docker-compose logs -f agent-service
 #### 3. 验证部署
 
 ```bash
-# 健康检查
+# 健康检查脚本（推荐）：一键检查全部 10 项依赖
+docker exec theme-template-agent python scripts/healthcheck.py
+
+# 单项检查
+docker exec theme-template-agent python scripts/healthcheck.py --only neo4j
+
+# HTTP 接口验证
 curl http://localhost:8000/health
 
 # 测试推荐
@@ -193,9 +209,36 @@ VECTOR_SEARCH_TOP_K=20
 EOF
 ```
 
-#### 3. 准备向量库数据（可选）
+#### 3. 准备向量库数据
 
-如果 Chroma 数据在本地：
+Chroma 向量库需要预先向量化。可通过两种方式准备：
+
+**方式一：使用向量化脚本初始化（推荐）**
+
+```bash
+# 创建数据目录
+mkdir -p /data/chroma
+
+# 启动临时容器执行向量化（完成后自动删除）
+docker run --rm \
+  --network host \
+  --env-file /opt/agent-service/.env \
+  -e CHROMA_PATH=/app/chroma/indicators_vector \
+  -v /data/chroma:/app/chroma \
+  theme-template-agent:latest \
+  python scripts/indicator_vectorizer.py --rebuild
+```
+
+向量化脚本支持以下命令：
+
+| 命令 | 说明 |
+|------|------|
+| `--rebuild` | 重建向量索引（清空重来） |
+| `--update` | 增量更新新增指标 |
+| `--stats` | 查看统计信息 |
+| `--search "关键词"` | 搜索演示 |
+
+**方式二：复制已有的向量库数据**
 
 ```bash
 # 复制向量库到服务器
@@ -216,6 +259,9 @@ docker run -d \
 
 # 查看日志
 docker logs -f theme-template-agent
+
+# 健康检查脚本（一键 10 项检查）
+docker exec theme-template-agent python scripts/healthcheck.py
 
 # 查看健康状态
 curl http://localhost:8000/health
@@ -438,6 +484,42 @@ curl http://localhost:8000/health
 curl http://localhost:8000/api/v1/health
 ```
 
+### 一键健康检查脚本
+
+除 HTTP 接口外，服务内置 `scripts/healthcheck.py` 脚本，可一键检查全部 10 项依赖，快速定位部署问题：
+
+```bash
+# 在 Docker 容器内执行
+docker exec theme-template-agent python scripts/healthcheck.py
+
+# 指定非默认端口（默认 8000）
+docker exec theme-template-agent python scripts/healthcheck.py --port 9000
+
+# 单项检查
+docker exec theme-template-agent python scripts/healthcheck.py --only neo4j
+docker exec theme-template-agent python scripts/healthcheck.py --only chroma_data
+```
+
+**检查项清单**：
+
+| Key | 检查内容 | 致命 | 跳过条件 |
+|-----|---------|------|---------|
+| `env` | 环境变量完整性（8个Key） | ✅ | - |
+| `embedding` | Embedding 返回维度=1024 | ✅ | env 失败 |
+| `llm` | LLM 调用"请回复：OK" | ✅ | env 失败 |
+| `neo4j` | Neo4j verify_connectivity() | ✅ | env 失败 |
+| `neo4j_data` | THEME/INDICATOR 节点数 >0 | ✅ | neo4j 失败 |
+| `chroma` | CHROMA_PATH + chroma.sqlite3 存在 | ✅ | env 失败 |
+| `chroma_data` | collection.count() > 0 | ✅ | chroma 失败 |
+| `vector` | 语义搜索"不良贷款率"返回结果 | ✅ | chroma/embedding 失败 |
+| `http` | GET /health → status=healthy | ⚠️非致命 | - |
+| `memory` | GET /health/memory → status=ok | ⚠️非致命 | - |
+
+> **CI/CD 集成**：脚本返回退出码 0（全部致命项通过）或 1（有致命失败），可直接用于 CI/CD pipeline：
+> ```bash
+> docker exec theme-template-agent python scripts/healthcheck.py && echo "部署验证通过"
+> ```
+
 ### 安全建议
 
 | 项目 | 建议 |
@@ -496,6 +578,10 @@ docker start theme-template-agent         # 启动
 docker restart theme-template-agent       # 重启
 docker logs -f theme-template-agent       # 查看日志
 docker exec -it theme-template-agent sh  # 进入容器
+
+# ── 健康检查（部署后验证 / 故障排查）──
+docker exec theme-template-agent python scripts/healthcheck.py           # 全部 10 项
+docker exec theme-template-agent python scripts/healthcheck.py --only neo4j  # 只检查 neo4j
 
 # ── Systemd 部署 ──
 sudo systemctl status agent-service
@@ -565,6 +651,7 @@ pip install -e . --force-reinstall
 sudo systemctl restart agent-service
 
 # 4. 验证
+docker exec theme-template-agent python scripts/healthcheck.py
 curl http://localhost:8000/health
 ```
 
@@ -572,11 +659,18 @@ curl http://localhost:8000/health
 
 ## 常见问题
 
-### Q1: 健康检查失败，Neo4j 连接不上
+### Q1: 服务启动后推荐接口报错
 
-**原因**：Neo4j 地址/密码配置错误
+**排查（推荐方式）**：使用健康检查脚本一键定位问题：
 
-**排查**：
+```bash
+docker exec theme-template-agent python scripts/healthcheck.py
+```
+
+**手动排查**：
+
+1. **Neo4j 连接失败**
+
 ```bash
 # 测试 Neo4j 连接
 docker exec theme-template-agent \
@@ -585,7 +679,9 @@ docker exec theme-template-agent \
     d.verify_connectivity(); print('OK')"
 ```
 
-**解决**：检查 `.env` 中的 `NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD` 配置
+解决：检查 `.env` 中的 `NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD` 配置
+
+2. **Chroma 向量库为空**：执行 `indicator_vectorizer.py --rebuild` 重新向量化
 
 ### Q2: LLM 调用返回 401 Unauthorized
 

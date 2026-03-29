@@ -37,33 +37,24 @@ from urllib3.util.retry import Retry
 from neo4j import GraphDatabase
 
 # ─────────────────────────────────────────────
-# 加载环境变量
+# 从 config 模块加载配置（统一配置管理）
 # ─────────────────────────────────────────────
-env_path = APP_DIR / ".env"
-if env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(env_path)
+from agent_service import config
 
-# ─────────────────────────────────────────────
 # SiliconFlow API 配置
-# ─────────────────────────────────────────────
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_EMBEDDING_API_KEY")
-SILICONFLOW_URL     = "https://api.siliconflow.cn/v1/embeddings"
-EMBEDDING_MODEL     = os.getenv("EMBEDDING_MODEL", "/")
-EMBEDDING_DIM       = 1024
+SILICONFLOW_API_KEY = config.SILICONFLOW_EMBEDDING_API_KEY
+SILICONFLOW_URL     = config.SILICONFLOW_EMBEDDING_URL
+EMBEDDING_MODEL     = config.EMBEDDING_MODEL
+EMBEDDING_DIM       = config.EMBEDDING_DIM
 
-# ─────────────────────────────────────────────
 # Neo4j 配置
-# ─────────────────────────────────────────────
-NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://localhost:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_URI      = config.NEO4J_URI
+NEO4J_USER     = config.NEO4J_USER
+NEO4J_PASSWORD = config.NEO4J_PASSWORD
 
-# ─────────────────────────────────────────────
-# Chroma 配置（存储到容器外部挂载路径）
-# ─────────────────────────────────────────────
-CHROMA_PATH     = os.getenv("CHROMA_PATH", "/app/chroma/indicators_vector")
-COLLECTION_NAME = "indicators"
+# Chroma 配置
+CHROMA_PATH     = config.CHROMA_PATH
+COLLECTION_NAME = config.COLLECTION_NAME
 PROGRESS_FILE   = os.path.join(CHROMA_PATH, "progress.json")
 
 # ─────────────────────────────────────────────
@@ -199,28 +190,37 @@ def get_all_indicators() -> list[dict]:
 # ══════════════════════════════════════════════
 # Chroma 工具
 # ══════════════════════════════════════════════
-def get_chroma_client() -> "chromadb.PersistentClient":
-    """获取 Chroma 持久化客户端"""
+def get_chroma_client():
+    """
+    获取 Chroma 持久化客户端
+    兼容 chromadb 0.4.x 和 1.5.x API
+    """
     os.makedirs(CHROMA_PATH, exist_ok=True)
     import chromadb
+    # 使用新的 PersistentClient API (chromadb >= 0.5.x)
     return chromadb.PersistentClient(path=CHROMA_PATH)
 
 
-def get_or_create_collection(
-    client: "chromadb.PersistentClient",
-) -> "chromadb.Collection":
-    """获取或创建 Collection"""
+def get_or_create_collection(client) -> "chromadb.Collection":
+    """
+    获取或创建 Collection
+    兼容 chromadb 0.4.x API（替代 0.5.x 的 get_or_create_collection）
+    """
     import chromadb
-    return client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"description": "魔数师指标向量库"},
-    )
+    try:
+        return client.get_collection(name=COLLECTION_NAME)
+    except Exception:
+        return client.create_collection(
+            name=COLLECTION_NAME,
+            metadata={"description": "魔数师指标向量库"},
+        )
 
 
-def rebuild_collection(
-    client: "chromadb.PersistentClient",
-) -> "chromadb.Collection":
-    """删除旧 Collection 并重建（用于 --rebuild 模式）"""
+def rebuild_collection(client) -> "chromadb.Collection":
+    """
+    删除旧 Collection 并重建（用于 --rebuild 模式）
+    兼容 chromadb 0.4.x API
+    """
     import chromadb
     try:
         client.delete_collection(COLLECTION_NAME)
@@ -229,7 +229,8 @@ def rebuild_collection(
         pass
     if os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
-    return client.get_or_create_collection(
+    # 0.4.x 使用 create_collection（不是 get_or_create_collection）
+    return client.create_collection(
         name=COLLECTION_NAME,
         metadata={"description": "魔数师指标向量库"},
     )

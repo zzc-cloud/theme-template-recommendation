@@ -43,20 +43,30 @@ _chroma_collection = None
 
 
 def _get_chroma_collection():
+    """
+    获取 Chroma Collection
+    使用 chromadb 0.4.x 的 PersistentClient API
+    """
     global _chroma_collection
     if _chroma_collection is not None:
         return _chroma_collection
 
     import chromadb
+    import os
 
-    os_path = __import__("os")
-    os_path.makedirs(config.CHROMA_PATH, exist_ok=True)
+    os.makedirs(config.CHROMA_PATH, exist_ok=True)
 
+    # 使用 PersistentClient API (chromadb 0.4.x)
     client = chromadb.PersistentClient(path=config.CHROMA_PATH)
-    _chroma_collection = client.get_or_create_collection(
-        name=config.COLLECTION_NAME,
-        metadata={"description": "魔数师指标向量库"},
-    )
+
+    # 先尝试获取，不存在则创建
+    try:
+        _chroma_collection = client.get_collection(name=config.COLLECTION_NAME)
+    except Exception:
+        _chroma_collection = client.create_collection(
+            name=config.COLLECTION_NAME,
+            metadata={"description": "魔数师指标向量库"},
+        )
     return _chroma_collection
 
 

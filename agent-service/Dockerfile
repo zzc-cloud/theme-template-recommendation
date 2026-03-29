@@ -1,6 +1,11 @@
 # ─────────────────────────────────────────────
 # Theme Template Recommendation Agent
 # Dockerfile
+#
+# 特性：
+# - NumPy 源码编译，自动适配目标平台
+# - amd64：从源码编译，使用通用 x86-64 指令集，兼容旧 CPU
+# - arm64：让编译器自动适配
 # ─────────────────────────────────────────────
 
 FROM python:3.11-slim
@@ -21,27 +26,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 先复制依赖文件，再安装依赖（利用 Docker 缓存）
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt \
-    && rm -rf /root/.cache/pip
-
-# ── 修复旧 CPU 兼容问题 ──
+# ── 旧 CPU 兼容处理 ──
 # 接收平台参数（buildx 自动注入：amd64 或 arm64）
 ARG TARGETARCH
 
-# amd64：强制通用 x86-64 指令集，兼容旧 CPU
-# arm64：让 gcc 自动适配 ARM
+# amd64：从源码编译 NumPy，使用通用 x86-64 指令集（兼容所有 CPU）
+# arm64：让 gcc 自动适配
 RUN pip uninstall numpy -y \
     && if [ "$TARGETARCH" = "amd64" ]; then \
-         echo ">>> 编译 x86-64 通用版 numpy" && \
-         NPY_BASELINE_OPTIMIZATION="NONE" \
-         NPY_DISPATCH_OPTIMIZATION="NONE" \
+         echo ">>> 编译 x86-64 通用版 NumPy（兼容旧 CPU）" && \
          CFLAGS="-march=x86-64 -mtune=generic" \
          CXXFLAGS="-march=x86-64 -mtune=generic" \
          pip install --no-cache-dir numpy --no-binary numpy; \
        else \
-         echo ">>> 编译 arm64 原生版 numpy" && \
+         echo ">>> 编译 arm64 原生版 NumPy" && \
          pip install --no-cache-dir numpy --no-binary numpy; \
        fi \
+    && rm -rf /root/.cache/pip
+
+# 安装其他依赖
+RUN pip install --no-cache-dir -r requirements.txt \
     && rm -rf /root/.cache/pip
 
 # ── 应用代码 ──
@@ -53,7 +57,7 @@ COPY scripts/ ./scripts/
 # ── 环境变量 ──
 # 生产环境应通过 docker run -e 或 docker-compose 环境变量覆盖
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app/src
 
 # ── 端口 ──
 EXPOSE 8000

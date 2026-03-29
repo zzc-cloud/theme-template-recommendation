@@ -13,8 +13,9 @@ pydantic>=2.0
 pydantic-settings>=2.0
 sse-starlette>=2.0.0
 
-# 向量数据库
-chromadb>=0.5.0
+# 向量数据库（锁定版本以兼容旧 CPU）
+chromadb==0.4.24
+numpy==1.24.4
 
 # 图数据库
 neo4j>=5.0.0

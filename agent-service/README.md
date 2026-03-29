@@ -83,7 +83,7 @@
 | 持久化 | LangGraph `TTLMemorySaver` Checkpointer（TTL=1天自动清理） |
 | 并发控制 | `asyncio.Semaphore`（可配置上限，默认10并发） |
 | Web 框架 | FastAPI + uvicorn |
-| 向量数据库 | Chroma |
+| 向量数据库 | Chroma 0.4.x（兼容旧 CPU） |
 | 图数据库 | Neo4j |
 | 流式传输 | Server-Sent Events (SSE) |
 
@@ -120,14 +120,16 @@ agent-service/
 │           ├── client.py          # LLM 客户端（结构化输出）
 │           ├── models.py           # Pydantic 响应模型
 │           └── prompts.py          # 各阶段 Prompt 定义
-├── scripts/                      # 本体层构建脚本（ETL）
-│   ├── config.py                 # ETL 配置（MySQL、Neo4j、源表映射）
+├── scripts/                      # 工具脚本
+│   ├── config.py                 # 配置文件（MySQL、Neo4j 连接等）
 │   ├── extract_indicators.py     # 魔数师指标层抽取
 │   ├── extract_templates.py      # 模板层抽取（INSIGHT / COMBINEDQUERY）
 │   ├── build_hierarchy.py        # 层级结构构建
 │   ├── neo4j_loader.py           # Neo4j 数据加载器
+│   ├── indicator_vectorizer.py   # 向量化脚本（Chroma 指标向量生成）
 │   ├── init_ontology.py          # 全量初始化脚本
 │   ├── update_ontology.py        # 增量更新脚本
+│   ├── healthcheck.py            # 一键健康检查脚本
 │   ├── .env.example              # 环境变量模板
 │   └── README.md                 # 脚本使用说明
 ├── tests/                        # 测试文件（含并发与TTL清理测试）
@@ -181,6 +183,52 @@ python -m agent_service.main
 ```
 
 ### 4. 验证
+
+#### 方式一：健康检查脚本（推荐）
+
+一键检查全部 10 项依赖，快速定位问题：
+
+```bash
+# 本地开发
+python scripts/healthcheck.py
+
+# Docker 环境
+docker exec theme-template-agent python scripts/healthcheck.py
+
+# 指定端口（非默认8000时）
+docker exec theme-template-agent python scripts/healthcheck.py --port 9000
+
+# 只检查单项（如 neo4j）
+docker exec theme-template-agent python scripts/healthcheck.py --only neo4j
+```
+
+检查项清单：
+
+| Key | 检查内容 | 致命 | 依赖 |
+|-----|---------|------|------|
+| `env` | 环境变量完整性（8个Key） | ✅ | 无 |
+| `embedding` | Embedding API 调用，验证返回维度=1024 | ✅ | env |
+| `llm` | LLM 调用，发送"请回复：OK"验证返回非空 | ✅ | env |
+| `neo4j` | Neo4j verify_connectivity() | ✅ | env |
+| `neo4j_data` | 查询 THEME/INDICATOR/TEMPLATE 节点数 >0 | ✅ | neo4j |
+| `chroma` | CHROMA_PATH 目录 + chroma.sqlite3 存在 | ✅ | env |
+| `chroma_data` | collection.count() > 0 | ✅ | chroma |
+| `vector` | search_indicators_by_vector("不良贷款率") 返回结果 | ✅ | chroma+embedding |
+| `http` | GET localhost:8000/health → status=healthy | ⚠️非致命 | 无 |
+| `memory` | GET localhost:8000/health/memory → status=ok | ⚠️非致命 | 无 |
+
+输出示例：
+
+```
+  [PASS]  Embedding 模型      312ms   dim=1024  model=Qwen/
+  [FAIL]  Neo4j 连接            5s    ServiceUnavailable: Failed to connect to bolt://...
+  [WARN]  Chroma 数据            8ms   ⚠️  向量库为空(count=0)，请执行 indicator_vectorizer.py --rebuild
+  [SKIP]  向量检索              --    跳过（前置依赖失败）
+
+  ✅  全部通过  8/8  总耗时 2.55s
+```
+
+#### 方式二：HTTP 接口验证
 
 ```bash
 # 健康检查
@@ -510,5 +558,6 @@ LLM 调用通过 `invoke_structured()` 实现，核心特性：
 | [API 对接文档](API.md) | 完整 API 对接指南（SSE 事件、请求/响应示例、前端集成） |
 | [DEPLOY.md](DEPLOY.md) | 完整部署指南（Docker、生产环境） |
 | [scripts/README.md](scripts/README.md) | 本体层构建脚本使用说明（ETL、初始化、增量更新） |
+| [scripts/healthcheck.py](scripts/healthcheck.py) | 一键健康检查脚本（10项检查，CI/CD 友好） |
 | [LangGraph 文档](https://langchain-ai.github.io/langgraph/) | LangGraph 官方文档 |
 | [LangChain 文档](https://python.langchain.com/docs) | LangChain 官方文档 |

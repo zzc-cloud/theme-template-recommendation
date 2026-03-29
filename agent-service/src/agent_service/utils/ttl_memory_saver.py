@@ -66,14 +66,13 @@ class TTLMemorySaver(InMemorySaver):
                 if now - ts > self.ttl_seconds
             ]
 
-        if not expired_ids:
-            return 0
+            if not expired_ids:
+                return 0
 
-        for tid in expired_ids:
-            # 清理 InMemorySaver 内部存储
-            self.storage.pop(tid, None)
-            self.writes.pop(tid, None)
-            with self._lock:
+            # 在同一个锁内完成所有清理，避免竞态条件
+            for tid in expired_ids:
+                self.storage.pop(tid, None)
+                self.writes.pop(tid, None)
                 self._timestamps.pop(tid, None)
 
         logger.info(f"[TTLMemorySaver] 清理 {len(expired_ids)} 个过期 thread: {expired_ids}")

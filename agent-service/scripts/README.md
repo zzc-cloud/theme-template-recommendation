@@ -9,12 +9,13 @@ scripts/
 ├── config.py              # 配置文件（MySQL、Neo4j 连接等）
 ├── extract_indicators.py  # 魔数师指标层抽取
 ├── extract_templates.py   # 模板层抽取（INSIGHT / COMBINEDQUERY）
-├���─ build_hierarchy.py     # 层级结构构建
+├── build_hierarchy.py     # 层级结构构建
 ├── neo4j_loader.py        # Neo4j 数据加载器
 ├── init_ontology.py       # 全量初始化脚本
 ├── update_ontology.py     # 增量更新脚本
+├── healthcheck.py         # 一键健康检查脚本（10项检查）
 ├── .env.example           # 环境变量模板
-└── README.md              # 本文件
+└── README.md             # 本文件
 ```
 
 ## 🔧 配置
@@ -84,6 +85,39 @@ crontab -e
 # 添加每月 1 日凌晨执行
 0 2 1 * * cd /path/to/agent-service/scripts && /usr/bin/python3 update_ontology.py >> logs/update.log 2>&1
 ```
+
+## 🔍 健康检查
+
+### 一键健康检查
+
+```bash
+# 在 Docker 容器内执行
+docker exec theme-template-agent python scripts/healthcheck.py
+
+# 单项检查
+docker exec theme-template-agent python scripts/healthcheck.py --only neo4j
+docker exec theme-template-agent python scripts/healthcheck.py --only chroma_data
+```
+
+### 检查项说明
+
+| Key | 说明 | 致命 |
+|-----|------|------|
+| `env` | 8 个环境变量完整性 | ✅ |
+| `embedding` | Embedding 返回维度=1024 | ✅ |
+| `llm` | LLM 调用可用性 | ✅ |
+| `neo4j` | Neo4j 连接 | ✅ |
+| `neo4j_data` | THEME/INDICATOR 节点数 >0 | ✅ |
+| `chroma` | CHROMA_PATH + chroma.sqlite3 存在 | ✅ |
+| `chroma_data` | collection.count() > 0 | ✅ |
+| `vector` | 语义搜索返回结果 | ✅ |
+| `http` | /health 接口状态 | ⚠️非致命 |
+| `memory` | /health/memory 接口状态 | ⚠️非致命 |
+
+> **CI/CD 集成**：退出码 0=全部通过，1=有致命失败，可直接用于 CI/CD：
+> ```bash
+> docker exec theme-template-agent python scripts/healthcheck.py && echo "验证通过"
+> ```
 
 ## 📊 本体层结构
 
