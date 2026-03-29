@@ -146,10 +146,10 @@ def _analyze_template_parallel(
     all_template_inds = template.get("all_template_indicators", [])
     all_inds_str = _build_template_indicators_str(all_template_inds)
 
-    missing_ids = template.get("missing_indicator_ids", [])
+    missing_aliases = template.get("missing_indicator_aliases", [])
     missing_inds_str = "（无需补充）"
-    if missing_ids:
-        missing_inds_str = "\n".join(f"- {mid}" for mid in missing_ids[:10])
+    if missing_aliases:
+        missing_inds_str = "\n".join(f"- {alias}" for alias in missing_aliases[:10])
 
     dim_str = _build_analysis_dimensions_str(analysis_dimensions)
 
@@ -191,7 +191,7 @@ def extract_phrases(state: AgentState) -> dict:
 
 
 def classify_and_iterate(state: AgentState) -> dict:
-    """阶段 0.2-0.3：词组分类 + 迭代精炼"""
+    """阶段 0.2-0.3：词组分类 + 迭代精炼（重构版）"""
     user_question = state["user_question"]
     phrases = state.get("extracted_phrases", [])
     writer = get_stream_writer()
@@ -216,139 +216,193 @@ def classify_and_iterate(state: AgentState) -> dict:
     for pf in filter_phrases:
         filter_indicators.append(_map_filter_phrase(pf))
 
-    # ── 0.3 迭代精炼 ──
-    search_results: dict[str, list] = {}
-    iteration_log = []
+    # ── 0.3 迭代精炼（重构版）──
+    # 数据结构初始化
+    pending_concepts: dict[str, list] = {c: [] for c in analysis_concepts}
+    converged_dimensions: dict[str, list] = {}
+    iteration_log: list[dict] = []
     iteration_round = 0
-    current_concepts = list(analysis_concepts)
 
-    while iteration_round < config.MAX_ITERATION_ROUNDS and current_concepts:
+    # 主循环
+    while iteration_round < config.MAX_ITERATION_ROUNDS:
+        # Step 1：搜索（仅对 pending_concepts 搜索）
+        if not pending_concepts:
+            break
+
         iteration_round += 1
+        current_concepts = list(pending_concepts.keys())
+        writer({
+            "stage": "classify_and_iterate",
+            "step": "searching",
+            "round": iteration_round,
+            "concepts": current_concepts,
+        })
 
-        round_search_results: dict[str, list] = {}
-
-        writer({"stage": "classify_and_iterate", "step": "searching", "status": "in_progress", "round": iteration_round, "concepts": current_concepts})
-
-        # 使用并行搜索辅助函数
         round_search_results = _search_concepts_parallel(
             current_concepts, top_k=config.VECTOR_SEARCH_TOP_K
         )
-
-        # 合并到总结果（去重）
+        # 覆盖更新 pending_concepts 的 value（不累积，每轮重新搜索）
         for concept, indicators in round_search_results.items():
-            if concept not in search_results:
-                search_results[concept] = []
-            existing_ids = {i["id"] for i in search_results[concept]}
-            for ind in indicators:
-                if ind["id"] not in existing_ids:
-                    search_results[concept].append(ind)
+            pending_concepts[concept] = indicators
 
-        # 构建搜索结果字符串用于 LLM 评估
-        search_results_str = _build_search_results_str(search_results)
+        # Step 2：收敛判定（代码客观判定，不再依赖 LLM）
+        newly_converged: list[str] = []
+        for concept in list(pending_concepts.keys()):
+            indicators = pending_concepts[concept]
+            top1_score = indicators[0]["similarity_score"] if indicators else 0.0
+            if top1_score >= config.CONVERGENCE_SIMILARITY_THRESHOLD:
+                # 收敛：移入 converged_dimensions
+                converged_dimensions[concept] = indicators
+                del pending_concepts[concept]
+                newly_converged.append(concept)
 
-        writer({"stage": "classify_and_iterate", "step": "evaluating", "status": "in_progress", "round": iteration_round})
+        writer({
+            "stage": "classify_and_iterate",
+            "step": "converged",
+            "round": iteration_round,
+            "newly_converged": newly_converged,
+            "converged_count": len(converged_dimensions),
+            "pending_count": len(pending_concepts),
+        })
 
-        # LLM 评估（结构化输出）
+        # Step 3：结束判定
+        if not pending_concepts:
+            break  # 正常收敛出口
+        if iteration_round >= config.MAX_ITERATION_ROUNDS:
+            break  # 超时强制出口
+
+        # Step 4：生成下一轮搜索词（仅对 pending_concepts 生成）
+        writer({
+            "stage": "classify_and_iterate",
+            "step": "evaluating",
+            "round": iteration_round,
+        })
+
+        pending_str = _build_pending_search_results_str(pending_concepts)
+        converged_str = _build_converged_concepts_str(converged_dimensions)
+
         try:
-            evaluation = llm_client.evaluate_iteration(
+            refinement = llm_client.refine_concepts(
                 user_question=user_question,
                 round_num=iteration_round,
                 max_rounds=config.MAX_ITERATION_ROUNDS,
-                search_results_str=search_results_str,
+                pending_search_results_str=pending_str,
+                converged_concepts_str=converged_str,
             )
+            new_concepts = refinement.new_concepts
         except Exception as e:
-            logger.warning(f"迭代评估失败: {e}")
-            evaluation = None
+            logger.warning(f"迭代精炼失败，使用原搜索词继续: {e}")
+            new_concepts = list(pending_concepts.keys())
 
-        if evaluation:
-            converged = evaluation.converged
-            normalized_question = evaluation.normalized_question
-            corrections = evaluation.corrections
-            low_conf_concepts = evaluation.low_confidence_concepts
-        else:
-            converged = True
-            normalized_question = user_question
-            corrections = []
-            low_conf_concepts = []
+        # 如果新词与原词完全相同，无法进一步优化，提前退出
+        if set(new_concepts) == set(pending_concepts.keys()):
+            logger.info("LLM 无法进一步优化搜索词，提前退出迭代")
+            break
+
+        # 替换 pending_concepts，value 清空等下轮搜索填充
+        pending_concepts = {c: [] for c in new_concepts}
 
         iteration_log.append({
             "round": iteration_round,
-            "search_results": dict(round_search_results),
-            "evaluation": evaluation.model_dump() if evaluation else None,
+            "pending_concepts": list(current_concepts),
+            "newly_converged": newly_converged,
+            "refinement": refinement.model_dump() if refinement else None,
         })
 
-        if converged:
-            break
+    # ── 迭代结束后的处理 ──
+    # Step A：生成规范化问题（迭代结束后调用一次）
+    filter_str = _build_filter_phrases_str(filter_indicators)
+    converged_str = _build_converged_concepts_str(converged_dimensions)
 
-        # 生成下一轮搜索词
-        new_concepts = []
-        for corr in corrections:
-            new_concepts.extend(corr.corrected)
+    try:
+        norm_result = llm_client.generate_normalized_question(
+            user_question=user_question,
+            filter_phrases_str=filter_str,
+            converged_concepts_str=converged_str,
+        )
+        normalized_question = norm_result.normalized_question
+    except Exception as e:
+        logger.warning(f"规范化问题生成失败，使用原文: {e}")
+        normalized_question = user_question
 
-        if not new_concepts or set(new_concepts) == set(current_concepts):
-            break
+    # Step B：出口判断
+    is_low_confidence = bool(pending_concepts)
 
-        current_concepts = new_concepts
-
-    # 构建分析维度
+    # Step C：构建 analysis_dimensions
     analysis_dimensions = []
-    for concept, indicators in search_results.items():
-        top1_score = indicators[0]["similarity_score"] if indicators else 0.0
+    for concept, indicators in converged_dimensions.items():
         analysis_dimensions.append({
             "search_term": concept,
-            "converged": top1_score >= config.CONVERGENCE_SIMILARITY_THRESHOLD,
+            "converged": True,
+            "indicators": indicators,
+        })
+    for concept, indicators in pending_concepts.items():
+        analysis_dimensions.append({
+            "search_term": concept,
+            "converged": False,
             "indicators": indicators,
         })
 
-    # 低置信度检查
-    low_confidence = any(
-        d["indicators"] and d["indicators"][0]["similarity_score"] < config.LOW_CONFIDENCE_THRESHOLD
-        for d in analysis_dimensions
-        if d["indicators"]
-    )
-    is_low_confidence = low_confidence and iteration_round >= config.MAX_ITERATION_ROUNDS
-
-    # 规范化问题
-    if evaluation and evaluation.normalized_question:
-        norm_question = evaluation.normalized_question
-    else:
-        norm_question = user_question
-
-    writer({"stage": "classify_and_iterate", "step": "completed", "status": "done", "iterations": iteration_round})
-
-    # ── 出口判断：低置信度 vs 正常收敛 ──
+    # Step D：低置信度出口的额外处理
+    low_confidence_message = ""
+    low_confidence_suggestions: list = []
     if is_low_confidence:
-        # 低置信度出口
-        low_conf_concepts = [
-            d["search_term"]
-            for d in analysis_dimensions
-            if d["indicators"] and d["indicators"][0]["similarity_score"] < config.LOW_CONFIDENCE_THRESHOLD
-        ]
-        search_results_str = _build_search_results_str(search_results)
+        low_conf_concepts = list(pending_concepts.keys())
+        pending_str = _build_pending_search_results_str(pending_concepts)
         try:
             low_conf_result = llm_client.handle_low_confidence(
                 user_question=user_question,
                 low_confidence_concepts=low_conf_concepts,
-                search_results_str=search_results_str,
+                search_results_str=pending_str,
             )
             low_confidence_message = low_conf_result.user_message
             low_confidence_suggestions = low_conf_result.suggestions
         except Exception as e:
             logger.warning(f"低置信度处理失败: {e}")
             low_confidence_message = "以下分析概念无法精确匹配，可能需要更清晰的描述："
-            low_confidence_suggestions = []
 
+    # Step E：推送完成事件
+    writer({
+        "stage": "classify_and_iterate",
+        "step": "completed",
+        "iterations": iteration_round,
+        "converged_count": len(converged_dimensions),
+        "low_confidence": is_low_confidence,
+    })
+
+    # Step F：构建返回值
+    if is_low_confidence:
+        # 低置信度出口：构建 pending_confirmation，前端展示收敛/未收敛维度让用户自选
+        filter_display = [
+            {"alias": f.get("alias", ""), "value": f.get("value", ""), "type": f.get("type", "")}
+            for f in filter_indicators
+        ]
+        dimension_options = [
+            {
+                "search_term": d["search_term"],
+                "converged": d["converged"],
+                "top_indicator_aliases": [i["alias"] for i in d["indicators"][:5]],
+                "top_indicators": d["indicators"][:5],
+            }
+            for d in analysis_dimensions
+        ]
+        pending_confirmation = {
+            "filter_display": filter_display,
+            "dimension_options": dimension_options,
+            "normalized_question": normalized_question,
+            "message": "以下筛选条件已自动识别，请选择要分析的维度（已标注收敛状态）：",
+        }
         return {
             "filter_indicators": filter_indicators,
-            "search_results": search_results,
+            "search_results": {**converged_dimensions, **pending_concepts},
             "iteration_round": iteration_round,
             "iteration_log": iteration_log,
             "analysis_dimensions": analysis_dimensions,
-            "normalized_question": norm_question,
-            "is_low_confidence": is_low_confidence,
+            "normalized_question": normalized_question,
+            "is_low_confidence": True,
             "low_confidence_message": low_confidence_message,
             "low_confidence_suggestions": low_confidence_suggestions,
-            "pending_confirmation": None,
+            "pending_confirmation": pending_confirmation,
             "user_confirmation": None,
         }
     else:
@@ -369,16 +423,16 @@ def classify_and_iterate(state: AgentState) -> dict:
         pending_confirmation = {
             "filter_display": filter_display,
             "dimension_options": dimension_options,
-            "normalized_question": norm_question,
+            "normalized_question": normalized_question,
             "message": "以下筛选条件已自动识别，请确认分析维度：",
         }
         return {
             "filter_indicators": filter_indicators,
-            "search_results": search_results,
+            "search_results": converged_dimensions,
             "iteration_round": iteration_round,
             "iteration_log": iteration_log,
             "analysis_dimensions": analysis_dimensions,
-            "normalized_question": norm_question,
+            "normalized_question": normalized_question,
             "is_low_confidence": False,
             "pending_confirmation": pending_confirmation,
             "user_confirmation": None,
@@ -523,23 +577,23 @@ def retrieve_templates(state: AgentState) -> dict:
 
         theme_id = theme["theme_id"]
 
-        # 收集用户需要的指标 ID
-        matched_indicator_ids = []
+        # 收集 LLM 裁决后的指标别名（覆盖率基于别名匹配）
+        matched_indicator_aliases = []
 
         for ind in theme.get("selected_filter_indicators", []):
-            if ind.get("indicator_id"):
-                matched_indicator_ids.append(ind["indicator_id"])
+            if ind.get("alias"):
+                matched_indicator_aliases.append(ind["alias"])
 
         for ind in theme.get("selected_analysis_indicators", []):
-            if ind.get("indicator_id"):
-                matched_indicator_ids.append(ind["indicator_id"])
+            if ind.get("alias"):
+                matched_indicator_aliases.append(ind["alias"])
 
-        if not matched_indicator_ids:
+        if not matched_indicator_aliases:
             continue
 
         result = template_tools.get_theme_templates_with_coverage(
             theme_id=theme_id,
-            matched_indicator_ids=matched_indicator_ids,
+            matched_indicator_aliases=matched_indicator_aliases,
             top_k=top_k,
         )
 
@@ -607,26 +661,36 @@ def wait_for_confirmation(state: AgentState) -> dict:
     writer = get_stream_writer()
 
     if state.get("is_low_confidence"):
-        # 低置信度中断
+        # 低置信度中断：展示维度选择界面（含收敛标记），让用户自选
         writer({"stage": "wait_for_confirmation", "step": "low_confidence", "status": "interrupted"})
-        user_input = interrupt({
+        pending_conf = state.get("pending_confirmation", {})
+        # 合并低置信度提示和维度确认数据
+        interrupt_data = {
             "type": "low_confidence",
             "message": state.get("low_confidence_message", ""),
             "suggestions": state.get("low_confidence_suggestions", []),
-        })
-        # 用户选择继续时，使用当前状态继续执行
-        confirmed_dimensions = [
-            d.get("search_term")
-            for d in state.get("analysis_dimensions", [])
-        ]
-        confirmed_question = state.get("normalized_question", state.get("user_question", ""))
+            # 维度选择相关字段（前端据此渲染维度勾选界面）
+            "filter_display": pending_conf.get("filter_display", []),
+            "dimension_options": pending_conf.get("dimension_options", []),
+            "normalized_question": pending_conf.get("normalized_question", ""),
+            "action_required": "请选择要进入分析的维度（可多选），然后点击继续；或修改问题后重新提交",
+        }
+        user_input = interrupt(interrupt_data)
+
+        # 读取用户实际选择的维度（用户可能只勾选收敛维度）
+        confirmed_dimensions = user_input.get("confirmed_dimensions", [])
+        confirmed_question = user_input.get(
+            "confirmed_question", state.get("normalized_question", state.get("user_question", ""))
+        )
     else:
         # 正常确认流程
         writer({"stage": "wait_for_confirmation", "step": "waiting_confirmation", "status": "in_progress"})
         user_input = interrupt(state.get("pending_confirmation"))
 
         confirmed_dimensions = user_input.get("confirmed_dimensions", [])
-        confirmed_question = user_input.get("confirmed_question", state.get("normalized_question", ""))
+        confirmed_question = user_input.get(
+            "confirmed_question", state.get("normalized_question", "")
+        )
 
     # 两种情况统一处理：过滤 analysis_dimensions，只保留用户确认的维度
     filtered_dimensions = [
@@ -733,7 +797,7 @@ def format_output(state: AgentState) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 def _build_search_results_str(search_results: dict[str, list]) -> str:
-    """构建搜索结果字符串"""
+    """构建搜索结果字符串（保留，用于低置信度等场景）"""
     lines = []
     for concept, indicators in search_results.items():
         lines.append(f"分析概念：「{concept}」")
@@ -746,6 +810,46 @@ def _build_search_results_str(search_results: dict[str, list]) -> str:
                 desc = ind.get("description", "")
                 lines.append(f"  - {alias}（相似度: {score:.2f}）描述: {desc}")
         lines.append("")
+    return "\n".join(lines)
+
+
+def _build_pending_search_results_str(pending_concepts: dict[str, list]) -> str:
+    """构建未收敛概念的搜索结果字符串（用于 LLM 精炼输入）"""
+    lines = []
+    for concept, indicators in pending_concepts.items():
+        top1_score = indicators[0]["similarity_score"] if indicators else 0.0
+        lines.append(f"分析概念：「{concept}」（Top-1 相似度: {top1_score:.2f}）")
+        if not indicators:
+            lines.append("  （无匹配结果）")
+        else:
+            for ind in indicators[:5]:
+                score = ind.get("similarity_score", 0)
+                alias = ind.get("alias", "")
+                desc = ind.get("description", "")
+                lines.append(f"  - {alias}（相似度: {score:.2f}）描述: {desc}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_converged_concepts_str(converged_dimensions: dict[str, list]) -> str:
+    """构建已收敛概念的列表字符串（用于 LLM 参考）"""
+    if not converged_dimensions:
+        return "（暂无已收敛概念）"
+    lines = []
+    for concept in converged_dimensions.keys():
+        lines.append(f"- {concept}")
+    return "\n".join(lines)
+
+
+def _build_filter_phrases_str(filter_indicators: list) -> str:
+    """构建筛选条件的描述字符串（用于规范化问题生成）"""
+    if not filter_indicators:
+        return "（无筛选条件）"
+    lines = []
+    for f in filter_indicators:
+        alias = f.get("alias", "")
+        value = f.get("value", "")
+        lines.append(f"- {alias} = {value}")
     return "\n".join(lines)
 
 
