@@ -149,39 +149,40 @@ search_results_v1 = {
 输入：
   - analysis_concepts: 0.2 输出的分析概念词组列表
   - search_results_v1: 0.2 中第 1 轮向量搜索结果
+  - converged_concepts: 已收敛概念集合（初始为空）
+  - unconverged_concepts: 未收敛概念集合（初始为 analysis_concepts）
 
-WHILE 未收敛 AND 轮次 <= 3:
-  1. LLM 评估当前搜索结果质量
-  2. 若质量达标 → 收敛出口，退出循环
-  3. 若质量不达标 → 生成修正搜索词
-  4. 调用 search_indicators_by_vector（修正后搜索词）
-  5. 合并新旧搜索结果（去重，保留高分候选）
-  6. 轮次 +1
+WHILE 轮次 < 5:
+  轮次 +1
+  1. 对 unconverged_concepts 中的每个概念调用 search_indicators_by_vector
+  2. 收敛判定：Top-1 >= 0.80 的概念移入 converged_concepts，从 unconverged_concepts 移除
+  3. 若 unconverged_concepts 为空 → 退出循环（正常收敛出口）
+  4. 若轮次已达 5 → 退出循环（超时出口，进入低置信度流程）
+  5. 对 unconverged_concepts 调用 LLM 生成下一轮修正搜索词
+  6. 若修正词与当前搜索词完全相同 → 退出循环（自然收敛，无新变化）
+  7. 用修正词替换 unconverged_concepts 的 key，进入下一轮
 END WHILE
 
 输出：
-  - converged_search_terms: 收敛后的搜索词列表（即分析维度）
-  - final_search_results: 每个搜索词对应的候选指标集合
+  - converged_search_terms: 收敛后的搜索词列表（即分析维度，来自 converged_concepts）
+  - final_search_results: 每个搜索词对应的候选指标集合（仅保留收敛概念的最终结果）
   - iteration_log: 迭代过程记录（用于探查输出展示）
 ```
 
 **收敛判断标准（满足任一即收敛）**：
 
-| 条件 | 说明 |
-|------|------|
-| 每个分析概念 Top-1 相似度 > 0.80 | 语义命中精准 |
-| 本轮修正搜索词与上轮完全相同 | 自然收敛，无新变化 |
-| 本轮新增候选指标数 = 0 | 搜索结果已饱和 |
+| 条件 | 说明 | 判断时机 |
+|------|------|----------|
+| 该概念 Top-1 相似度 >= 0.80 | 语义命中精准 | 每轮搜索后，逐概念判断，满足则移入已收敛集合 |
+| 所有概念均已收敛 | 未收敛集合为空 | 每轮收敛判定后，整体判断，满足则退出循环 |
+| 本轮修正词与当前搜索词完全相同 | LLM 无法进一步优化 | LLM 生成修正词后判断，满足则退出循环 |
 
 **超时出口处理（低置信度）**：
 
-3 轮结束后仍有分析概念 Top-1 相似度 < 0.60，进入低置信度流程：
-- 停止迭代，不进入用户确认
-- 向用户说明哪个分析概念无法匹配
-- 提供 2~3 个换词建议
-- 等待用户重新描述后，重新进入 0.1
+5 轮结束后 unconverged_concepts 仍不为空（即存在 Top-1 相似度 < 0.80 的概念），进入低置信度流程：
+- 停止迭代，进入低置信度确认交互，展示已收敛维度（默认勾选）和未收敛维度（带警告、默认不勾选），由用户决定是否纳入未收敛维度继续执行，或重新描述换词
 
-**每轮 LLM 评估 Prompt**：
+**每轮 LLM 修正搜索词生成 Prompt**（仅对未收敛概念执行）：
 
 ```
 你是银行数据分析专家，正在帮助用户精确定位分析指标。
@@ -191,8 +192,8 @@ END WHILE
 
 【当前轮次】第 {round} 轮
 
-【当前分析概念及搜索结果】
-{for concept, results in current_search_results}
+【未收敛分析概念及搜索结果】
+{for concept, results in unconverged_concepts}
 分析概念：「{concept}」
 搜索结果 Top-5：
   {for r in results[:5]}
@@ -200,42 +201,79 @@ END WHILE
   {/for}
 {/for}
 
-【评估任务】
-1. 覆盖评估：用户意图的哪些部分已被覆盖？哪些缺失？
-2. 质量判断：当前结果是否达标？（每个分析概念 Top-1 > 0.80）
-3. 若不达标，诊断问题：
-   - 搜索词过于宽泛？（结果太杂）→ 收缩
-   - 搜索词过于口语化？（结果偏离）→ 替换
-   - 搜索词缺少限定词？（召回不足）→ 扩展
-   - 多个搜索词指向同一意图？→ 合并
-4. 输出修正搜索词，同时输出规范化问题描述
+【诊断任务】
+针对每个未收敛的分析概念（Top-1 相似度 < 0.80），诊断问题并生成修正搜索词：
+- 搜索词过于宽泛？（结果太杂）→ 收缩
+- 搜索词过于口语化？（结果偏离）→ 替换
+- 搜索词缺少限定词？（召回不足）→ 扩展
+- 多个搜索词指向同一意图？→ 合并
 
 【输出格式（JSON）】
 {
-  "quality_pass": true/false,
-  "coverage_assessment": "已覆盖XX，缺失XX",
-  "normalized_question": "规范化后的问题描述（收敛时输出）",
   "corrections": [
     {
       "original": "原搜索词",
       "action": "扩展/收缩/替换/合并",
-      "corrected": ["修正后搜索词1", "修正后搜索词2"],
+      "corrected": "修正后搜索词",
       "reason": "修正原因"
     }
-  ]
+  ],
+  "normalized_question": "规范化后的问题描述（若本轮后预计全部收敛则输出）"
 }
 ```
 
-#### 0.4 用户确认分析维度
+#### 0.4 用户确认分析维度 + 勾选引导
 
-基于 0.3 收敛后的搜索词（即分析维度）及其关联候选指标，展示给用户确认。
+基于 0.3 所有的分析概念（收敛的和未收敛的分析概念）及其关联候选指标，展示给用户确认。
 
 **关键说明**：
 - **分析维度 = 0.3 收敛后的搜索词**，无需额外归纳，直接展示
 - 指标仅作为辅助说明，帮助用户理解该维度的含义
 - 筛选值不展示在选项中，仅在说明中标注"自动应用"
 
+**⚠️ 勾选引导（核心改进）**：
+
+多个分析维度同时勾选时，可能出现"主题交叉干扰"问题，导致推荐效果下降。
+
+**核心改进**：通过查询 Neo4j 获取每个维度的真实 theme_id，基于 theme_id 集合计算 Jaccard 相似度，
+避免仅凭指标别名猜测主题导致的误判。
+
+**处理流程（3 步）**：
+
+1. **查 Neo4j**：对每个维度的全部指标（Top-20），调用 `batch_get_indicator_themes()` 批量获取其所属的 THEME 节点
+2. **算 Jaccard**：计算维度两两之间的 Jaccard 相似度 = |交集 theme| / |并集 theme|
+   - Jaccard >= 0.5 → 主题高度重叠，两个维度互补性强（可同时勾选）
+   - Jaccard < 0.5  → 主题几乎无交集，存在主题交叉干扰（建议优先勾选核心维度）
+3. **LLM 引导**：将 theme 信息 + Jaccard 矩阵注入 Prompt，LLM 综合分析后生成引导建议
+
+**引导输出结构**：
+
+```
+dimension_guidance: {
+  "has_conflict": true/false,          // 是否存在主题交叉（基于 Jaccard < 0.5 判定）
+  "recommended_first": ["维度A"],       // 建议优先勾选的核心维度
+  "conflict_analysis": "维度A命中了X个主题，维度B命中了Y个主题，Jaccard=xx（<0.5=有冲突），...",
+  "selection_advice": "勾选建议（1-2句话）",
+  "dimension_analysis": [
+    {
+      "dimension": "维度名",
+      "matched_themes": ["主题1", "主题2"],  // 命中的真实主题别名列表
+      "theme_count": 4,                      // 命中主题数量
+      "independence_score": 0.0-1.0,         // 独立性得分（LLM 给出）
+      "core_concept_score": 0.0-1.0,        // 核心概念得分（LLM 给出）
+      "recommendation": "优先/可选/建议后选"
+    }
+  ]
+}
+```
+
+**异常处理**：若 LLM 调用失败（网络/解析错误），`dimension_guidance` 为 `None`，跳过引导步骤继续执行后续流程。
+
 **AskUserQuestion 配置**：
+
+> **注意**：当 `dimension_guidance.has_conflict = true` 时，应在问题描述中增加引导提示，
+> 告知用户"建议优先勾选最核心的维度，全选不一定最优"；若 `has_conflict = false`，
+> 说明各维度主题一致或互补，无需额外引导。
 
 ```
 AskUserQuestion:
@@ -456,9 +494,9 @@ recommended_themes = [
 ```
 get_theme_templates_with_coverage(
   theme_id="...",
-  matched_indicator_ids=[
-    ...selected_filter_indicators 的 indicator_id,
-    ...selected_analysis_indicators 的 indicator_id
+  matched_indicator_aliases=[
+    ...selected_filter_indicators 的 alias,
+    ...selected_analysis_indicators 的 alias
   ],
   top_k=10
 )
@@ -493,12 +531,12 @@ get_theme_templates_with_coverage(
 
 #### 2.2 LLM 可用性与缺口分析
 
-**目标**：对 2.1 返回的模板，LLM 结合用户问题与模板的完整指标构成，分析该模板的实际可用性，并对缺失指标（`missing_indicator_ids`）给出具体的影响说明与补充建议。
+**目标**：对 2.1 返回的模板，LLM 结合用户问题与模板的完整指标构成，分析该模板的实际可用性，并对缺失指标（`missing_indicator_aliases`）给出具体的影响说明与补充建议。
 
 **执行规则**：
 - 若 `has_qualified_templates = false`（降级推荐）：**必须**向用户说明"未找到覆盖率 >= 80% 的达标模板，以下为参考推荐"
-- 覆盖率 = 100%（`missing_indicator_ids` 为空）→ 标记为"完整覆盖"，跳过缺口分析
-- 覆盖率 < 100%（`missing_indicator_ids` 不为空）→ 执行缺口分析
+- 覆盖率 = 100%（`missing_indicator_aliases` 为空）→ 标记为"完整覆盖"，跳过缺口分析
+- 覆盖率 < 100%（`missing_indicator_aliases` 不为空）→ 执行缺口分析
 
 **LLM 可用性与缺口分析 Prompt**：
 

@@ -370,6 +370,12 @@ def classify_and_iterate(state: AgentState) -> dict:
         "low_confidence": is_low_confidence,
     })
 
+    # Step E2：生成维度勾选引导（基于 Jaccard 的主题交叉检测）
+    dimension_guidance = _generate_dimension_guidance(
+        user_question=user_question,
+        analysis_dimensions=analysis_dimensions,
+    )
+
     # Step F：构建返回值
     if is_low_confidence:
         # 低置信度出口：构建 pending_confirmation，前端展示收敛/未收敛维度让用户自选
@@ -404,6 +410,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "low_confidence_suggestions": low_confidence_suggestions,
             "pending_confirmation": pending_confirmation,
             "user_confirmation": None,
+            "dimension_guidance": dimension_guidance,
         }
     else:
         # 正常收敛出口：构建待确认数据
@@ -438,6 +445,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "user_confirmation": None,
             "low_confidence_message": "",
             "low_confidence_suggestions": [],
+            "dimension_guidance": dimension_guidance,
         }
 
 
@@ -795,6 +803,155 @@ def format_output(state: AgentState) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 # 辅助函数
 # ═══════════════════════════════════════════════════════════════════════
+# 分析维度勾选引导
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _compute_jaccard_similarity(set_a: set, set_b: set) -> float:
+    """计算两个集合的 Jaccard 相似度"""
+    if not set_a and not set_b:
+        return 1.0
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union > 0 else 0.0
+
+
+def _generate_dimension_guidance(
+    user_question: str,
+    analysis_dimensions: list[dict],
+) -> dict | None:
+    """阶段 0.4：生成分析维度勾选引导（基于 Neo4j theme_id 的 Jaccard 检测）
+
+    1. 收集所有维度的指标 ID
+    2. 批量查询 Neo4j 获取每个指标的 theme_id 集合
+    3. 计算维度两两之间的 Jaccard 相似度
+    4. 将主题信息注入 Prompt，调用 LLM 生成最终引导
+    """
+
+    if not analysis_dimensions or len(analysis_dimensions) < 2:
+        return None
+
+    # Step 1: 收集所有维度的指标 ID（取 Top-20 以内，避免过多）
+    dim_indicator_map: dict[str, list[dict]] = {}  # dim_name -> indicators
+    all_indicator_ids: list[str] = []
+    for dim in analysis_dimensions:
+        dim_name = dim.get("search_term", dim.get("dimension", ""))
+        indicators = dim.get("indicators", [])
+        dim_indicator_map[dim_name] = indicators
+        for ind in indicators[:20]:
+            if ind.get("id"):
+                all_indicator_ids.append(ind["id"])
+
+    if not all_indicator_ids:
+        return None
+
+    # Step 2: 批量查询 Neo4j 获取 theme_id
+    theme_mapping = theme_tools.batch_get_indicator_themes(all_indicator_ids)
+
+    # Step 3: 构建每个维度的主题集合
+    dim_themes: dict[str, list[dict]] = {}  # dim_name -> [{"id": theme_id, "alias": theme_alias}]
+    for dim_name, indicators in dim_indicator_map.items():
+        theme_list: list[dict] = []
+        seen_theme_ids: set[str] = set()
+        for ind in indicators[:20]:
+            ind_id = ind.get("id")
+            if ind_id and ind_id in theme_mapping:
+                for theme in theme_mapping[ind_id]:
+                    if theme["id"] not in seen_theme_ids:
+                        seen_theme_ids.add(theme["id"])
+                        theme_list.append(theme)
+        dim_themes[dim_name] = theme_list
+
+    # Step 4: 计算 Jaccard 相似度矩阵
+    dim_names = list(dim_themes.keys())
+    jaccard_matrix: dict[str, dict[str, float]] = {}
+    for i, dim_a in enumerate(dim_names):
+        jaccard_matrix[dim_a] = {}
+        for j, dim_b in enumerate(dim_names):
+            if i == j:
+                jaccard_matrix[dim_a][dim_b] = 1.0
+            else:
+                themes_a = {t["id"] for t in dim_themes[dim_a]}
+                themes_b = {t["id"] for t in dim_themes[dim_b]}
+                jaccard_matrix[dim_a][dim_b] = _compute_jaccard_similarity(themes_a, themes_b)
+
+    # Step 5: 构建分析维度字符串（含真实 theme 信息）
+    analysis_dimensions_str_parts = []
+    for dim in analysis_dimensions:
+        dim_name = dim.get("search_term", dim.get("dimension", ""))
+        indicators = dim.get("indicators", [])
+        themes = dim_themes.get(dim_name, [])
+
+        # Top-5 指标
+        top_inds = indicators[:5]
+        ind_lines = []
+        for ind in top_inds:
+            alias = ind.get("alias", "")
+            score = ind.get("similarity_score", 0)
+            desc = ind.get("description", "")
+            ind_lines.append(f"  - {alias}（相似度: {score:.2f}）描述: {desc}")
+
+        # 命中的主题列表
+        theme_lines = []
+        for t in themes:
+            theme_lines.append(f"  - [{t['id']}] {t['alias']}")
+
+        part = f"""分析维度：「{dim_name}」
+  命中主题数: {len(themes)}
+  命中主题列表:
+{chr(10).join(theme_lines) if theme_lines else "  （无主题信息）"}
+  关联指标 Top-5:
+{chr(10).join(ind_lines)}"""
+        analysis_dimensions_str_parts.append(part)
+
+    analysis_dimensions_str = "\n\n".join(analysis_dimensions_str_parts)
+
+    # Step 6: 构建 dimensions_str（旧版兼容，提供 Jaccard 矩阵摘要）
+    dimensions_str_parts = []
+    for i, dim_a in enumerate(dim_names):
+        row = [f"{dim_a} vs {dim_b}: Jaccard={jaccard_matrix[dim_a][dim_b]:.2f}"
+               for j, dim_b in enumerate(dim_names) if i < j]
+        dimensions_str_parts.extend(row)
+
+    dimensions_str = "\n".join(dimensions_str_parts) if dimensions_str_parts else "（仅一个维度）"
+
+    # Step 7: 调用 LLM 生成引导
+    try:
+        guidance = llm_client.generate_dimension_selection_guidance(
+            user_question=user_question,
+            dimensions_str=dimensions_str,
+            analysis_dimensions_str=analysis_dimensions_str,
+        )
+        # 转换为 dict（兼容直接返回）
+        result = {
+            "has_conflict": guidance.has_conflict,
+            "recommended_first": guidance.recommended_first,
+            "conflict_analysis": guidance.conflict_analysis,
+            "selection_advice": guidance.selection_advice,
+            "dimension_analysis": [
+                {
+                    "dimension": item.dimension,
+                    "matched_themes": [t["alias"] for t in dim_themes.get(item.dimension, [])],
+                    "theme_count": len(dim_themes.get(item.dimension, [])),
+                    "independence_score": item.independence_score,
+                    "core_concept_score": item.core_concept_score,
+                    "recommendation": item.recommendation,
+                }
+                for item in guidance.dimension_analysis
+            ],
+            # 附加调试信息（供后续记录）
+            "_jaccard_matrix": jaccard_matrix,
+            "_dim_themes": dim_themes,
+        }
+        logger.info(f"维度勾选引导生成完成: has_conflict={result['has_conflict']}, "
+                    f"推荐优先={result['recommended_first']}")
+        return result
+    except Exception as e:
+        logger.warning(f"维度勾选引导 LLM 调用失败: {e}，跳过引导")
+        return None
+
 
 def _build_search_results_str(search_results: dict[str, list]) -> str:
     """构建搜索结果字符串（保留，用于低置信度等场景）"""
