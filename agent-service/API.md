@@ -1,6 +1,6 @@
 # 主题模板推荐服务 API 对接文档
 
-> **版本**：v1.5（补充 summary 事件、同步接口文档）
+> **版本**：v1.6（迭代精炼机制重构：收敛判定客观化、LLM 职责单一化、规范化问题只生成一次）
 > **协议**：HTTP + SSE（Server-Sent Events）
 > **Base URL**：`http://{host}/api/v1`
 
@@ -240,6 +240,9 @@ Content-Type: application/json
 
 ### 5.2 progress — 阶段内部进度
 
+迭代精炼阶段（classify_and_iterate）的 progress 事件包含多种 step：
+
+**step == "searching"**：第 N 轮开始搜索
 ```json
 {
   "event_type": "progress",
@@ -247,7 +250,6 @@ Content-Type: application/json
   "raw": {
     "stage": "classify_and_iterate",
     "step": "searching",
-    "status": "in_progress",
     "round": 1,
     "concepts": ["小微企业贷款", "不良率"]
   },
@@ -255,12 +257,61 @@ Content-Type: application/json
 }
 ```
 
+**step == "converged"**：第 N 轮收敛判定完成
+```json
+{
+  "event_type": "progress",
+  "markdown": "│   ✅ 本轮收敛：`不良率`，剩余待精炼：1 个",
+  "raw": {
+    "stage": "classify_and_iterate",
+    "step": "converged",
+    "round": 1,
+    "newly_converged": ["不良率"],
+    "converged_count": 1,
+    "pending_count": 1
+  },
+  "timestamp": 1718000000.789
+}
+```
+
+**step == "evaluating"**：第 N 轮 LLM 精炼搜索词
+```json
+{
+  "event_type": "progress",
+  "markdown": "│   🤖 LLM 精炼第 1 轮搜索词...",
+  "raw": {
+    "stage": "classify_and_iterate",
+    "step": "evaluating",
+    "round": 1
+  },
+  "timestamp": 1718000001.012
+}
+```
+
+**step == "completed"**：迭代精炼完成
+```json
+{
+  "event_type": "progress",
+  "markdown": "│ ✅ 迭代精炼完成，共 **2** 轮，**3** 个维度已收敛\n└─────────────────────────────────────────",
+  "raw": {
+    "stage": "classify_and_iterate",
+    "step": "completed",
+    "iterations": 2,
+    "converged_count": 3,
+    "low_confidence": false
+  },
+  "timestamp": 1718000002.345
+}
+```
+
+> 低置信度出口时的 completed 事件：`low_confidence: true`，markdown 显示"部分维度未能收敛，进入低置信度流程"。
+
 **progress 字段说明**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `markdown` | string | 服务端预渲染的 Markdown 格式进度文字，前端可直接渲染（追加到聊天气泡或日志区域），无需自行拼接 |
-| `raw` | object | 原始节点数据，包含 stage、step、status 等，可用于前端自行渲染进度条 |
+| `raw` | object | 原始节点数据，包含 stage、step 等；step == "completed" 时含 converged_count 和 low_confidence |
 | `timestamp` | number | 事件时间戳 |
 
 > **前端建议**：可直接将 markdown 字段的内容追加到进度展示区域，无需自行拼接进度文字。raw 字段可忽略或用于实现自定义进度条。
@@ -331,9 +382,71 @@ Content-Type: application/json
 
 > **注意**：`top_indicator_aliases` 是 `top_indicators` 的 alias 提取，两者内容一一对应。
 
+### 5.3.1 dimension_guidance — 维度勾选引导（新增）
+
+当 `pending_confirmation` 中包含 `dimension_guidance` 字段时（多维度场景下会自动生成），前端应在维度选择界面上展示引导提示，帮助用户判断应优先勾选哪些维度。
+
+```json
+{
+  "has_conflict": true,
+  "recommended_first": ["小微企业不良贷款率"],
+  "conflict_analysis": "「小微企业不良贷款率」命中10个小微考核及不良统计主题，「贷款五级分类」命中19个信用卡/对公/个人信贷主题。Jaccard=0.00（<0.5），主题几乎无交集，存在严重主题交叉干扰",
+  "selection_advice": "建议优先勾选「小微企业不良贷款率」，确认推荐结果满意后再考虑补充其他维度",
+  "dimension_analysis": [
+    {
+      "dimension": "小微企业不良贷款率",
+      "matched_themes": ["科创板块小微业务考核员工统计主题", "不良生成贷款统计日报_多维度主题"],
+      "theme_count": 10,
+      "independence_score": 0.9,
+      "core_concept_score": 0.95,
+      "recommendation": "优先"
+    },
+    {
+      "dimension": "贷款五级分类",
+      "matched_themes": ["信用卡账户", "外呼营销业务效果（账户）", "对公贷款借据还款计划主题"],
+      "theme_count": 19,
+      "independence_score": 0.3,
+      "core_concept_score": 0.7,
+      "recommendation": "建议后选"
+    }
+  ]
+}
+```
+
+**dimension_guidance 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `has_conflict` | bool | 是否存在主题交叉冲突（基于 Jaccard < 0.5 判定） |
+| `recommended_first` | array\<string\> | 建议优先勾选的核心维度（按优先级排序），取 `dimension_analysis` 中 `recommendation="优先"` 的维度 |
+| `conflict_analysis` | string | 维度间主题冲突的专业分析（可展示给高级用户参考），应包含 Jaccard 数值 |
+| `selection_advice` | string | 面向用户的简洁勾选建议（1-2句话，直接展示在界面上） |
+| `dimension_analysis` | array | 各维度的详细分析 |
+| `dimension_analysis[].dimension` | string | 分析维度名称（search_term） |
+| `dimension_analysis[].matched_themes` | array\<string\> | 该维度命中 Neo4j 的真实主题别名列表 |
+| `dimension_analysis[].theme_count` | int | 命中主题的总数量 |
+| `dimension_analysis[].independence_score` | float | 独立性得分 0.0~1.0，越高表示越独立（与其他维度越不重叠） |
+| `dimension_analysis[].core_concept_score` | float | 核心概念得分 0.0~1.0，越高表示越能代表用户的核心分析意图 |
+| `dimension_analysis[].recommendation` | string | 建议等级：优先 / 可选 / 建议后选 |
+
+**前端展示建议**：
+
+- `has_conflict == true` 时，在维度选择区顶部展示引导卡片：
+  - 高亮 `recommended_first` 中的维度（推荐优先勾选）
+  - 展示 `selection_advice` 作为提示文案
+  - `conflict_analysis` 可折叠展示（面向高级用户）
+- `has_conflict == false` 时，`dimension_guidance` 存在但无需特殊展示，用户可按默认顺序勾选
+- 单维度场景下 `dimension_guidance` 不会出现（无需引导）
+
+> **实现说明**：`dimension_guidance` 由服务端 LLM 自动生成，生成失败时不阻塞流程（返回 null）。前端应做好 `dimension_guidance` 字段可能不存在的容错处理。
+
 ### 5.4 interrupt（低置信度类型）
 
-当某些概念无法精确匹配时，推送低置信度 interrupt：
+当迭代达到最大轮次（5 轮）后，仍有概念 Top-1 相似度 < 0.80，推送低置信度 interrupt。
+
+**与正常 interrupt 的区别**：低置信度 interrupt 的 `pending_confirmation` 不仅包含低置信度提示，还包含维度选择数据，前端需同时展示：
+1. 低置信度警告和换词建议
+2. 收敛/未收敛维度列表，供用户自选
 
 ```json
 {
@@ -350,25 +463,63 @@ Content-Type: application/json
         "alternatives": ["农户贷款标志", "涉农贷款借据标志", "三农贷款"]
       }
     ],
-    "action_required": "请修改问题描述后重新提交（使用新的 thread_id）"
+    "action_required": "请选择要进入分析的维度（可多选），然后点击继续；或修改问题后重新提交",
+    "filter_display": [
+      {
+        "alias": "二级账务机构名称",
+        "value": "南京分行",
+        "type": "机构筛选指标"
+      }
+    ],
+    "dimension_options": [
+      {
+        "search_term": "小微企业贷款",
+        "converged": true,
+        "top_indicator_aliases": ["借据余额", "贷款本金", "贷款笔数", "五级分类", "不良贷款余额"],
+        "top_indicators": [
+          {
+            "id": "INDICATOR.xxx",
+            "alias": "借据余额",
+            "similarity_score": 0.92
+          }
+        ]
+      },
+      {
+        "search_term": "涉农标识",
+        "converged": false,
+        "top_indicator_aliases": ["农户贷款标志", "涉农贷款标志"],
+        "top_indicators": [
+          {
+            "id": "INDICATOR.yyy",
+            "alias": "农户贷款标志",
+            "similarity_score": 0.35
+          }
+        ]
+      }
+    ],
+    "normalized_question": "分析南京分行2024年小微企业贷款及涉农标识情况"
   }
 }
 ```
 
-> **重要**：低置信度 interrupt 后，用户有两个选择：
-> 1. **继续执行**：调用 `/resume` 接口，使用当前已识别的维度继续分析
+> **重要**：低置信度 interrupt 后，前端应提供维度选择界面，用户可：
+> 1. **自选维度继续**：勾选想要分析的维度（收敛或未收敛均可），点击继续 → 调用 `/resume`
 > 2. **重新提问**：修改问题描述后重新调用 `/recommend`（生成新的 thread_id）
->
-> 前端应为用户提供这两个选项，而不是强制用户重新提问。
 
-**低置信度 pending_confirmation 字段说明**：
+**低置信度 pending_confirmation 完整字段说明**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `type` | string | 固定为 `"low_confidence"` |
 | `message` | string | 面向用户的友好提示信息 |
-| `suggestions` | array | 换词建议列表，每项含 concept（无法匹配的概念）、reason（原因）、alternatives（建议替换词） |
+| `suggestions` | array | 换词建议列表，每项含 concept、reason、alternatives |
 | `action_required` | string | 告知用户下一步操作指引 |
+| `filter_display` | array | 已识别的筛选条件（仅展示） |
+| `dimension_options` | array | 分析维度列表，含 converged 标记，用户可自选 |
+| `dimension_options[].search_term` | string | 维度标识 |
+| `dimension_options[].converged` | bool | true=高置信度已收敛，false=未收敛（匹配质量低） |
+| `normalized_question` | string | 规范化问题，用户可修改后传回 |
+| `dimension_guidance` | object | 维度勾选引导（多维度时自动生成），结构同上 5.3.1 节。`has_conflict==true` 时，前端应在维度选择区顶部展示引导卡片 |
 
 ### 5.5 final — 最终结果
 

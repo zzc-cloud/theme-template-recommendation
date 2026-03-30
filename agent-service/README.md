@@ -33,7 +33,8 @@
 | 能力 | 说明 |
 |------|------|
 | 语义搜索 | 基于向量数据库（Chroma）实现指标语义匹配 |
-| 迭代精炼 | 最多 3 轮搜索词修正，自动收敛 |
+| 迭代精炼 | 最多 5 轮搜索词修正，自动收敛 |
+| 维度勾选引导 | 多维度场景下由 LLM 分析维度间的主题交叉冲突，生成优先勾选建议，减少因"主题交叉干扰"导致的推荐质量下降 |
 | 结构化输出 | 使用 `with_structured_output()` 替代手动 JSON 解析 |
 | 重试机制 | 按错误类型差异化重试（限流/超时/5xx/认证/格式/未知），指数退避 + jitter |
 | 批量失败终止 | 主题裁决、模板分析等批量 LLM 调用，任一失败整批立即终止，统一通过 SSE error 事件告知前端 |
@@ -58,9 +59,9 @@
 │  wait_for_confirmation → aggregate_themes → complete_indicators   │
 │  → judge_themes → retrieve_templates → analyze_templates          │
 │  → format_output                                                   │
-│                                                                     │
 │  [TTLMemorySaver Checkpointer — 会话状态持久化 + 1天TTL自动清理]    │
-│  注：wait_for_confirmation 节点会触发 interrupt，暂停执行等待用户确认  │
+│  注：classify_and_iterate 节点末尾生成维度勾选引导（多维度时），      │
+│      与 pending_confirmation 一起通过 interrupt 暂停执行，等待用户确认  │
 └──────────────────────────────────────────────────────────────────┘
                               │
          ┌────────────────────┼────────────────────┐
@@ -384,9 +385,9 @@ data: {"event_type": "final", "data": {...}, "timestamp": 1710000005.0}
 | `EMBEDDING_DIM` | 1024 | Embedding 向量维度 |
 | `CHROMA_PATH` | 自动推断 | Chroma 向量库路径 |
 | `VECTOR_SEARCH_TOP_K` | 20 | 向量搜索返回数量 |
-| `MAX_ITERATION_ROUNDS` | 3 | 最大迭代轮次 |
-| `CONVERGENCE_SIMILARITY_THRESHOLD` | 0.80 | 收敛相似度阈值 |
-| `LOW_CONFIDENCE_THRESHOLD` | 0.60 | 低置信度阈值 |
+| `MAX_ITERATION_ROUNDS` | 5 | 最大迭代轮次 |
+| `CONVERGENCE_SIMILARITY_THRESHOLD` | 0.80 | 收敛相似度阈值（Top-1 >= 此值则收敛） |
+| `LOW_CONFIDENCE_THRESHOLD` | 与收敛阈值相同 | 低置信度阈值（迭代结束后仍有概念 < 此值则进入低置信度流程） |
 | `MAX_CONCURRENT_REQUESTS` | 10 | 最大并发请求数（超限返回429） |
 | `CONCURRENT_TIMEOUT_SECONDS` | 5.0 | 等待信号量的超时时间（秒） |
 | `LLM_CALL_TIMEOUT_SECONDS` | 60.0 | LLM 单次调用超时时间（秒） |
