@@ -70,7 +70,7 @@ LLM_MODEL: str = os.getenv(
     "LLM_MODEL",
     "Pro/zai-org/GLM-4.7",
 )
-LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 
 
@@ -92,17 +92,15 @@ COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "indicators")
 # Agent 配置
 # ─────────────────────────────────────────────
 # 最大迭代精炼轮次
-MAX_ITERATION_ROUNDS: int = int(os.getenv("MAX_ITERATION_ROUNDS", "3"))
+MAX_ITERATION_ROUNDS: int = int(os.getenv("MAX_ITERATION_ROUNDS", "5"))
 
-# 收敛阈值：Top-1 相似度 > 此值则认为命中
+# 收敛阈值：Top-1 相似度 >= 此值则认为命中，同时作为低置信度阈值
 CONVERGENCE_SIMILARITY_THRESHOLD: float = float(
     os.getenv("CONVERGENCE_SIMILARITY_THRESHOLD", "0.80")
 )
 
-# 低置信度阈值：超过此轮次仍未达标，进入低置信度流程
-LOW_CONFIDENCE_THRESHOLD: float = float(
-    os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.60")
-)
+# 低置信度阈值：与收敛阈值相同，迭代结束后仍有概念 Top-1 < 此值则进入低置信度流程
+LOW_CONFIDENCE_THRESHOLD: float = CONVERGENCE_SIMILARITY_THRESHOLD
 
 # 默认 top_k 参数
 DEFAULT_TOP_K_THEMES: int = int(os.getenv("DEFAULT_TOP_K_THEMES", "3"))

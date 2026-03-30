@@ -116,6 +116,15 @@ class UserConfirmation(TypedDict):
     confirmed_question: str
 
 
+class DimensionGuidance(TypedDict):
+    """分析维度勾选引导"""
+    has_conflict: bool
+    recommended_first: list[str]
+    conflict_analysis: str
+    selection_advice: str
+    dimension_analysis: list
+
+
 # ─────────────────────────────────────────────
 # Agent State
 # ─────────────────────────────────────────────
@@ -139,6 +148,7 @@ class AgentState(TypedDict):
     # ── 用户交互状态 ──
     low_confidence_message: str                # 低置信度提示信息
     low_confidence_suggestions: list           # 低置信度换词建议
+    dimension_guidance: DimensionGuidance | None  # 维度勾选引导
     pending_confirmation: dict | None         # 待用户确认的交互数据
     user_confirmation: UserConfirmation | None # 用户确认结果
     conversation_history: list[ConversationRound]  # 对话历史

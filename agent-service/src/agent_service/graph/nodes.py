@@ -310,22 +310,9 @@ def classify_and_iterate(state: AgentState) -> dict:
         })
 
     # ── 迭代结束后的处理 ──
-    # Step A：生成规范化问题（迭代结束后调用一次）
-    filter_str = _build_filter_phrases_str(filter_indicators)
-    converged_str = _build_converged_concepts_str(converged_dimensions)
+    # 注意：normalized_question 延迟到 wait_for_confirmation 节点生成，基于用户最终确认的维度
 
-    try:
-        norm_result = llm_client.generate_normalized_question(
-            user_question=user_question,
-            filter_phrases_str=filter_str,
-            converged_concepts_str=converged_str,
-        )
-        normalized_question = norm_result.normalized_question
-    except Exception as e:
-        logger.warning(f"规范化问题生成失败，使用原文: {e}")
-        normalized_question = user_question
-
-    # Step B：出口判断
+    # Step A：出口判断
     is_low_confidence = bool(pending_concepts)
 
     # Step C：构建 analysis_dimensions
@@ -395,7 +382,7 @@ def classify_and_iterate(state: AgentState) -> dict:
         pending_confirmation = {
             "filter_display": filter_display,
             "dimension_options": dimension_options,
-            "normalized_question": normalized_question,
+            "normalized_question": "",
             "message": "以下筛选条件已自动识别，请选择要分析的维度（已标注收敛状态）：",
             "dimension_guidance": dimension_guidance,
         }
@@ -405,7 +392,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "iteration_round": iteration_round,
             "iteration_log": iteration_log,
             "analysis_dimensions": analysis_dimensions,
-            "normalized_question": normalized_question,
+            "normalized_question": "",
             "is_low_confidence": True,
             "low_confidence_message": low_confidence_message,
             "low_confidence_suggestions": low_confidence_suggestions,
@@ -431,7 +418,7 @@ def classify_and_iterate(state: AgentState) -> dict:
         pending_confirmation = {
             "filter_display": filter_display,
             "dimension_options": dimension_options,
-            "normalized_question": normalized_question,
+            "normalized_question": "",
             "message": "以下筛选条件已自动识别，请确认分析维度：",
             "dimension_guidance": dimension_guidance,
         }
@@ -441,7 +428,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "iteration_round": iteration_round,
             "iteration_log": iteration_log,
             "analysis_dimensions": analysis_dimensions,
-            "normalized_question": normalized_question,
+            "normalized_question": "",
             "is_low_confidence": False,
             "pending_confirmation": pending_confirmation,
             "user_confirmation": None,
@@ -690,18 +677,14 @@ def wait_for_confirmation(state: AgentState) -> dict:
 
         # 读取用户实际选择的维度（用户可能只勾选收敛维度）
         confirmed_dimensions = user_input.get("confirmed_dimensions", [])
-        confirmed_question = user_input.get(
-            "confirmed_question", state.get("normalized_question", state.get("user_question", ""))
-        )
+        confirmed_question_from_ui = user_input.get("confirmed_question")
     else:
         # 正常确认流程
         writer({"stage": "wait_for_confirmation", "step": "waiting_confirmation", "status": "in_progress"})
         user_input = interrupt(state.get("pending_confirmation"))
 
         confirmed_dimensions = user_input.get("confirmed_dimensions", [])
-        confirmed_question = user_input.get(
-            "confirmed_question", state.get("normalized_question", "")
-        )
+        confirmed_question_from_ui = user_input.get("confirmed_question")
 
     # 两种情况统一处理：过滤 analysis_dimensions，只保留用户确认的维度
     filtered_dimensions = [
@@ -709,14 +692,34 @@ def wait_for_confirmation(state: AgentState) -> dict:
         if d.get("search_term") in confirmed_dimensions
     ]
 
+    # 基于用户确认的维度生成 normalized_question
+    # 如果用户在界面手动修改了问题描述（confirmed_question_from_ui），优先使用
+    if confirmed_question_from_ui:
+        final_normalized_question = confirmed_question_from_ui
+    elif filtered_dimensions:
+        confirmed_str = _build_confirmed_concepts_str(filtered_dimensions)
+        filter_str = _build_filter_phrases_str(state.get("filter_indicators", []))
+        try:
+            norm_result = llm_client.generate_normalized_question(
+                user_question=state.get("user_question", ""),
+                filter_phrases_str=filter_str,
+                converged_concepts_str=confirmed_str,
+            )
+            final_normalized_question = norm_result.normalized_question
+        except Exception as e:
+            logger.warning(f"规范化问题生成失败，使用原文: {e}")
+            final_normalized_question = state.get("user_question", "")
+    else:
+        final_normalized_question = state.get("user_question", "")
+
     user_confirmation: UserConfirmation = {
         "confirmed_dimensions": confirmed_dimensions,
-        "confirmed_question": confirmed_question,
+        "confirmed_question": final_normalized_question,
     }
 
     return {
         "analysis_dimensions": filtered_dimensions,
-        "normalized_question": confirmed_question,
+        "normalized_question": final_normalized_question,
         "pending_confirmation": None,
         "user_confirmation": user_confirmation,
     }
@@ -761,6 +764,7 @@ def format_output(state: AgentState) -> dict:
                 "theme_id": t["theme_id"],
                 "theme_alias": t["theme_alias"],
                 "theme_level": t["theme_level"],
+                "theme_path": t.get("theme_path", ""),
                 "is_supported": t["is_supported"],
                 "support_reason": t["support_reason"],
                 "selected_filter_indicators": t["selected_filter_indicators"],
@@ -1001,6 +1005,21 @@ def _build_converged_concepts_str(converged_dimensions: dict[str, list]) -> str:
     return "\n".join(lines)
 
 
+def _build_confirmed_concepts_str(filtered_dimensions: list) -> str:
+    """构建用户确认的分析维度字符串（用于 normalized_question 生成）"""
+    if not filtered_dimensions:
+        return "（无确认的分析维度）"
+    lines = []
+    for d in filtered_dimensions:
+        concept = d.get("search_term", "")
+        top_indicators = [i.get("alias", "") for i in d.get("indicators", [])[:3]]
+        if top_indicators:
+            lines.append(f"- 「{concept}」（关联指标: {', '.join(top_indicators)}）")
+        else:
+            lines.append(f"- {concept}")
+    return "\n".join(lines)
+
+
 def _build_filter_phrases_str(filter_indicators: list) -> str:
     """构建筛选条件的描述字符串（用于规范化问题生成）"""
     if not filter_indicators:
@@ -1118,8 +1137,75 @@ def generate_summary(state: AgentState) -> dict:
 
             parts.append("。")
 
-    # 5. 推荐模板
-    if templates:
+    # 5. 按主题维度推荐模板
+    supported_themes = [t for t in themes if t.get('is_supported', False)] if themes else []
+
+    if supported_themes:
+        # 以 is_supported 的主题为维度，每个主题展示其关联模板
+        parts.append("关于模板推荐：")
+        for theme in supported_themes:
+            theme_name = theme.get('theme_alias', '')
+            # 展示时去掉 "主题" 后缀，避免 "针对「xxx主题」主题" 的重复
+            theme_display = theme_name.removesuffix('主题') if theme_name.endswith('主题') else theme_name
+            # 找到属于该主题的模板
+            theme_templates = [t for t in templates if t.get('theme_alias', '') == theme_name]
+
+            if theme_templates:
+                for t in theme_templates:
+                    template_name = t.get('template_alias', '')
+                    coverage = t.get('coverage_ratio', 0) * 100
+                    usage = t.get('usage_count', 0)
+                    usability = t.get('usability', {})
+                    usability_summary = usability.get('usability_summary', '')
+                    has_qualified = t.get('has_qualified_templates', False)
+                    fallback_reason = t.get('fallback_reason', '')
+
+                    if has_qualified:
+                        # 达标模板
+                        parts.append(f"针对「{theme_display}」主题：推荐「{template_name}」模板（覆盖率 {coverage:.0f}%，使用 {usage} 次）")
+                        if usability_summary:
+                            parts.append(f"，{usability_summary}")
+                        missing = usability.get('missing_indicator_analysis', [])
+                        if missing:
+                            missing_strs = []
+                            for m in missing[:2]:
+                                alias = m.get('indicator_alias', '')
+                                importance = m.get('importance', '')
+                                if importance:
+                                    missing_strs.append(f"{alias}（{importance}）")
+                                else:
+                                    missing_strs.append(alias)
+                            parts.append(f"。缺失指标：{', '.join(missing_strs)}")
+                        parts.append("。")
+                    else:
+                        # 无达标模板，降级推荐
+                        # fallback_reason 格式："无覆盖率 >= 80% 的达标模板，该主题下仅有 1 个可用模板「xxx」（覆盖率 xx%，使用 xx 次）"
+                        parts.append(f"针对「{theme_display}」主题：{fallback_reason}，")
+                        if usability_summary:
+                            summary = usability_summary.strip()
+                            # 去掉开头重复的 "该模板"，换成 "但" 作为转折
+                            if summary.startswith("该模板"):
+                                summary = "但" + summary[3:]
+                            if summary.endswith("。"):
+                                parts.append(summary)
+                            else:
+                                parts.append(f"{summary}。")
+                        missing = usability.get('missing_indicator_analysis', [])
+                        if missing:
+                            missing_strs = []
+                            for m in missing[:2]:
+                                alias = m.get('indicator_alias', '')
+                                importance = m.get('importance', '')
+                                if importance:
+                                    missing_strs.append(f"{alias}（{importance}）")
+                                else:
+                                    missing_strs.append(alias)
+                            parts.append(f"缺失指标：{', '.join(missing_strs)}")
+                        parts.append("。")
+            else:
+                parts.append(f"针对「{theme_display}」主题：该主题下没有可用模板，建议直接在主题中勾选所需指标进行分析。")
+    elif templates:
+        # 无 supported 主题但有模板时，兜底展示
         parts.append("关于模板推荐：")
         for t in templates:
             template_name = t.get('template_alias', '')
@@ -1133,7 +1219,6 @@ def generate_summary(state: AgentState) -> dict:
             if usability_summary:
                 parts.append(f"，{usability_summary}")
 
-            # 缺口说明
             missing = usability.get('missing_indicator_analysis', [])
             if missing:
                 missing_strs = []

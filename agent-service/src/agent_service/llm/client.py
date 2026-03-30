@@ -22,10 +22,12 @@ from .. import config
 from .models import (
     PhraseExtraction,
     PhraseClassification,
-    IterationEvaluation,
+    IterationRefinementResult,
+    NormalizedQuestionResult,
     LowConfidenceResult,
     ThemeJudgment,
     TemplateUsability,
+    DimensionSelectionGuidance,
 )
 
 logger = logging.getLogger(__name__)
@@ -483,23 +485,42 @@ def classify_phrases(user_question: str, phrases: list[str]) -> PhraseClassifica
     return invoke_structured(PhraseClassification, system_prompt, user_prompt)
 
 
-def evaluate_iteration(
+def refine_concepts(
     user_question: str,
     round_num: int,
     max_rounds: int,
-    search_results_str: str,
-) -> IterationEvaluation:
-    """阶段 0.3：迭代评估"""
+    pending_search_results_str: str,
+    converged_concepts_str: str,
+) -> IterationRefinementResult:
+    """阶段 0.3：迭代精炼 - 生成下一轮搜索词"""
     from . import prompts as llm_prompts
 
     system_prompt = "你是一个专业的银行数据分析专家，正在精确定位分析指标。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
-    user_prompt = llm_prompts.ITERATION_EVALUATION_PROMPT.format(
+    user_prompt = llm_prompts.ITERATION_REFINEMENT_PROMPT.format(
         user_question=user_question,
         round=round_num,
         max_rounds=max_rounds,
-        search_results_str=search_results_str,
+        pending_search_results_str=pending_search_results_str,
+        converged_concepts_str=converged_concepts_str,
     )
-    return invoke_structured(IterationEvaluation, system_prompt, user_prompt)
+    return invoke_structured(IterationRefinementResult, system_prompt, user_prompt)
+
+
+def generate_normalized_question(
+    user_question: str,
+    filter_phrases_str: str,
+    converged_concepts_str: str,
+) -> NormalizedQuestionResult:
+    """阶段 0.3：生成规范化问题（迭代结束后调用一次）"""
+    from . import prompts as llm_prompts
+
+    system_prompt = "你是一个专业的银行数据分析专家，擅长将口语化问题转换为标准分析语言。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
+    user_prompt = llm_prompts.NORMALIZED_QUESTION_PROMPT.format(
+        user_question=user_question,
+        filter_phrases_str=filter_phrases_str,
+        converged_concepts_str=converged_concepts_str,
+    )
+    return invoke_structured(NormalizedQuestionResult, system_prompt, user_prompt)
 
 
 def handle_low_confidence(
@@ -517,6 +538,23 @@ def handle_low_confidence(
         search_results_str=search_results_str,
     )
     return invoke_structured(LowConfidenceResult, system_prompt, user_prompt)
+
+
+def generate_dimension_selection_guidance(
+    user_question: str,
+    dimensions_str: str,
+    analysis_dimensions_str: str,
+) -> DimensionSelectionGuidance:
+    """阶段 0.4：生成分析维度勾选引导"""
+    from . import prompts as llm_prompts
+
+    system_prompt = "你是一个专业的银行数据分析专家，擅长分析维度间的独立性和推荐优先级。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
+    user_prompt = llm_prompts.DIMENSION_SELECTION_GUIDANCE_PROMPT.format(
+        user_question=user_question,
+        dimensions_str=dimensions_str,
+        analysis_dimensions_str=analysis_dimensions_str,
+    )
+    return invoke_structured(DimensionSelectionGuidance, system_prompt, user_prompt)
 
 
 def judge_theme(

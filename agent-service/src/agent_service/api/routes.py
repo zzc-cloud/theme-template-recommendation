@@ -105,10 +105,24 @@ def translate_event_to_markdown(data: dict) -> str | None:
             return f"│ **[0.3] 第 {round_num} 轮迭代精炼**\n│   🔍 搜索词：{concepts_str}"
         if step == "evaluating":
             round_num = data.get("round", 1)
-            return f"│   🤖 LLM 评估第 {round_num} 轮搜索结果..."
+            return f"│   🤖 LLM 精炼第 {round_num} 轮搜索词..."
+        if step == "converged":
+            round_num = data.get("round", 1)
+            newly_converged = data.get("newly_converged", [])
+            pending_count = data.get("pending_count", 0)
+            if newly_converged:
+                conv_str = "、".join(f"`{c}`" for c in newly_converged)
+                return f"│   ✅ 本轮收敛：{conv_str}，剩余待精炼：{pending_count} 个"
+            else:
+                return f"│   🔄 本轮暂无收敛，继续精炼..."
         if step == "completed":
             iterations = data.get("iterations", 1)
-            return f"│ ✅ 迭代精炼完成，共 **{iterations}** 轮收敛\n└─────────────────────────────────────────"
+            converged_count = data.get("converged_count", 0)
+            is_low_confidence = data.get("low_confidence", False)
+            if is_low_confidence:
+                return f"│ ⚠️ 迭代精炼结束（共 **{iterations}** 轮），部分维度未能收敛，进入低置信度流程\n└─────────────────────────────────────────"
+            else:
+                return f"│ ✅ 迭代精炼完成，共 **{iterations}** 轮，**{converged_count}** 个维度已收敛\n└─────────────────────────────────────────"
 
     # ── 阶段 0.4 等待确认 ──
     if stage == "wait_for_confirmation":
@@ -364,6 +378,7 @@ async def recommend_stream(req: RecommendRequest):
                 "is_low_confidence": False,
                 "low_confidence_message": "",
                 "low_confidence_suggestions": [],
+                "dimension_guidance": None,
                 "pending_confirmation": None,
                 "user_confirmation": None,
                 "conversation_history": initial_history,

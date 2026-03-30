@@ -498,3 +498,47 @@ def get_indicator_full_path(indicator_id: str) -> dict:
     except Exception as e:
         logger.exception(f"获取指标路径失败: {e}")
         return {"success": False, "error": str(e)}
+
+
+def batch_get_indicator_themes(indicator_ids: list[str]) -> dict[str, list[dict]]:
+    """批量查询指标所属的 THEME 节点（单次 Cypher，比逐个调用 get_indicator_full_path 高效）
+
+    Args:
+        indicator_ids: 指标 ID 列表
+
+    Returns:
+        {indicator_id: [{"id": "theme_id", "alias": "theme_alias"}]}
+        查不到的 indicator_id 不会出现在返回结果中
+    """
+    import time
+    start = time.time()
+
+    if not indicator_ids:
+        return {}
+
+    try:
+        with get_neo4j_driver().session() as session:
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(i:INDICATOR)
+            WHERE entry.alias = '自主分析'
+              AND i.id IN $indicator_ids
+            WITH i, [node IN nodes(path) WHERE labels(node)[0] = 'THEME'] AS theme_nodes
+            UNWIND theme_nodes AS tn
+            WITH i.id AS indicator_id, collect(DISTINCT {
+                id: tn.id, alias: tn.alias
+            }) AS themes
+            RETURN indicator_id, themes
+            """
+            results = session.run(cypher, indicator_ids=indicator_ids)
+
+            mapping: dict[str, list[dict]] = {}
+            for record in results:
+                mapping[record["indicator_id"]] = record["themes"]
+
+            logger.info(f"batch_get_indicator_themes: {len(mapping)}/{len(indicator_ids)} 指标命中主题, "
+                        f"耗时 {round((time.time() - start) * 1000, 1)}ms")
+            return mapping
+
+    except Exception as e:
+        logger.exception(f"批量查询指标主题失败: {e}")
+        return {}

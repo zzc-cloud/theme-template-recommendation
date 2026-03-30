@@ -31,27 +31,21 @@ class PhraseClassification(BaseModel):
     )
 
 
-class Correction(BaseModel):
-    """搜索词修正"""
-    original: str = Field(description="原搜索词")
-    action: str = Field(description="修正动作：扩展/收缩/替换/合并")
-    corrected: list[str] = Field(description="修正后搜索词列表")
-    reason: str = Field(description="修正原因")
-
-
-class IterationEvaluation(BaseModel):
-    """阶段 0.3：迭代评估结果"""
-    quality_pass: bool = Field(description="质量是否达标")
-    converged: bool = Field(description="是否已收敛")
-    coverage_assessment: str = Field(description="覆盖率评估：已覆盖XX，缺失XX")
-    normalized_question: str = Field(description="规范化后的问题描述")
-    corrections: list[Correction] = Field(
-        default_factory=list,
-        description="搜索词修正列表"
+class IterationRefinementResult(BaseModel):
+    """阶段 0.3：迭代精炼结果"""
+    new_concepts: list[str] = Field(
+        description="下一轮搜索词列表，数量应与未收敛概念数量一致或更少"
     )
-    low_confidence_concepts: list[str] = Field(
-        default_factory=list,
-        description="无法收敛的分析概念列表"
+    reasoning: str = Field(
+        default="",
+        description="诊断说明，用于调试和日志"
+    )
+
+
+class NormalizedQuestionResult(BaseModel):
+    """阶段 0.3：规范化问题结果"""
+    normalized_question: str = Field(
+        description="规范化后的需求描述，不超过 100 字"
     )
 
 
@@ -63,6 +57,27 @@ class LowConfidenceResult(BaseModel):
         description="换词建议列表"
     )
     user_message: str = Field(description="面向用户的友好提示信息")
+
+
+class DimensionAnalysisItem(BaseModel):
+    """维度分析条目"""
+    dimension: str = Field(description="分析维度名称")
+    primary_theme: str = Field(description="该维度主要命中的主题")
+    independence_score: float = Field(description="独立性得分 0.0-1.0，越高越独立")
+    core_concept_score: float = Field(description="核心概念得分 0.0-1.0，越高越代表用户核心意图")
+    recommendation: str = Field(description="建议：优先/可选/建议后选")
+
+
+class DimensionSelectionGuidance(BaseModel):
+    """阶段 0.4：分析维度勾选引导结果"""
+    has_conflict: bool = Field(description="是否存在主题交叉冲突")
+    recommended_first: list[str] = Field(description="建议优先勾选的核心维度列表")
+    conflict_analysis: str = Field(description="维度间主题冲突分析")
+    selection_advice: str = Field(description="面向用户的勾选建议（1-2句话）")
+    dimension_analysis: list[DimensionAnalysisItem] = Field(
+        default_factory=list,
+        description="各维度的详细分析"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════

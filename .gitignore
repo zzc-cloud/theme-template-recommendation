@@ -8,6 +8,7 @@ build/
 
 # Virtual environments
 mcp-server/venv/
+agent-service/venv/
 .venv/
 
 # IDE

@@ -185,7 +185,6 @@ Content-Type: application/json
 |------|------|------|------|
 | `thread_id` | string | ✅ | 与 /recommend 请求中完全相同的 thread_id |
 | `confirmed_dimensions` | array\<string\> | ✅ | 用户勾选的分析维度列表，值为 search_term（来自 interrupt 事件中的 `dimension_options[].search_term`） |
-| `confirmed_question` | string | ❌ | 用户确认或修改后的问题描述。**为空字符串时**，服务端自动使用规范化问题（来自 interrupt 事件的 `pending_confirmation.normalized_question`） |
 
 ### 请求示例
 
@@ -378,7 +377,7 @@ Content-Type: application/json
 | `dimension_options[].converged` | bool | 是否高置信度收敛（true 表示匹配质量好） |
 | `dimension_options[].top_indicator_aliases` | array\<string\> | 该维度关联的 Top 5 指标别名（从 top_indicators 提取），辅助用户理解 |
 | `dimension_options[].top_indicators` | array\<object\> | 该维度关联的 Top 5 指标完整对象，含 id、alias、similarity_score |
-| `normalized_question` | string | 服务端生成的规范化问题，用户可修改后传回 |
+| `normalized_question` | string | 预留字段，当前为空。规范化问题在用户确认维度后生成，可由用户在界面手动修改后传回 |
 
 > **注意**：`top_indicator_aliases` 是 `top_indicators` 的 alias 提取，两者内容一一对应。
 
@@ -732,7 +731,7 @@ Content-Type: application/json
 
 #### ③ 问题确认区（可编辑）
 
-展示 `normalized_question`，用户可修改：
+此处展示 `confirmed_question`（用户可在界面修改），用于传回 `/resume`。初始可显示原始问题或留空，确认后此处显示 LLM 生成的规范化描述：
 
 ```
 ┌─────────────────────────────────────────┐
