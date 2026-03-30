@@ -49,7 +49,7 @@ def get_driver():
 @mcp.tool(annotations={"readOnlyHint": True})
 def get_theme_templates_with_coverage(
     theme_id: str,
-    matched_indicator_ids: list,
+    matched_indicator_aliases: list,
     template_type: str = None,
     top_k: int = 10
 ) -> str:
@@ -59,7 +59,7 @@ def get_theme_templates_with_coverage(
 
     Args:
         theme_id: 主题 ID
-        matched_indicator_ids: 用户匹配的指标 ID 列表
+        matched_indicator_aliases: 用户匹配的指标别名列表
         template_type: 模板类型过滤（"INSIGHT" / "COMBINEDQUERY" / None 全部）
         top_k: 返回数量，默认 10
 
@@ -79,11 +79,13 @@ def get_theme_templates_with_coverage(
     3. 如果没有 >= 80% 的模板，降级推荐：
        - 覆盖率最高的模板（1个）
        - 热度最高的模板（1个，如果与覆盖率最高不同）
+
+    注意：覆盖率计算基于指标别名匹配，而非 ID 匹配。
     """
     start = time.time()
     try:
         # 限制参数
-        matched_indicator_ids = matched_indicator_ids[:100] if matched_indicator_ids else []
+        matched_indicator_aliases = matched_indicator_aliases[:100] if matched_indicator_aliases else []
         top_k = min(max(1, top_k), 50)
 
         with get_driver().session() as session:
@@ -94,7 +96,7 @@ def get_theme_templates_with_coverage(
             elif template_type == "COMBINEDQUERY":
                 type_filter = "AND t:COMBINEDQUERY_TEMPLATE"
 
-            user_indicator_set = set(matched_indicator_ids)
+            user_indicator_set = set(matched_indicator_aliases)
             user_indicator_count = len(user_indicator_set)
 
             # 查询主题下的模板及其包含的所有指标（只取 heat > 0 的模板）
@@ -120,15 +122,15 @@ def get_theme_templates_with_coverage(
             all_templates = []
             for row in result:
                 template_indicators = row["template_indicators"] or []
-                template_indicator_ids = set(i["id"] for i in template_indicators if i.get("id"))
+                template_indicator_aliases = set(i["alias"] for i in template_indicators if i.get("alias"))
 
-                # 覆盖率 = 模板覆盖的用户指标数 / 用户需要的指标总数
-                covered_ids = list(user_indicator_set & template_indicator_ids)
-                matched_count = len(covered_ids)
+                # 覆盖率 = 模板覆盖的用户指标别名数 / 用户需要的指标别名总数
+                covered_aliases = list(user_indicator_set & template_indicator_aliases)
+                matched_count = len(covered_aliases)
                 coverage_ratio = matched_count / user_indicator_count if user_indicator_count > 0 else 0.0
 
-                # 缺失指标 = 用户指标 - 模板指标交集
-                missing_ids = list(user_indicator_set - template_indicator_ids)
+                # 缺失指标别名 = 用户指标别名 - 模板指标别名交集
+                missing_aliases = list(user_indicator_set - template_indicator_aliases)
 
                 all_templates.append({
                     "template_id": row["template_id"],
@@ -136,8 +138,8 @@ def get_theme_templates_with_coverage(
                     "template_description": row["template_description"],
                     "usage_count": row["usage_count"] or 0,
                     "coverage_ratio": round(coverage_ratio, 3),
-                    "covered_indicator_ids": covered_ids,
-                    "missing_indicator_ids": missing_ids,
+                    "covered_indicator_aliases": covered_aliases,
+                    "missing_indicator_aliases": missing_aliases,
                     "all_template_indicators": [
                         {
                             "indicator_id": i.get("id", ""),
