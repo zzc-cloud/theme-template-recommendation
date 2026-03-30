@@ -397,6 +397,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "dimension_options": dimension_options,
             "normalized_question": normalized_question,
             "message": "以下筛选条件已自动识别，请选择要分析的维度（已标注收敛状态）：",
+            "dimension_guidance": dimension_guidance,
         }
         return {
             "filter_indicators": filter_indicators,
@@ -432,6 +433,7 @@ def classify_and_iterate(state: AgentState) -> dict:
             "dimension_options": dimension_options,
             "normalized_question": normalized_question,
             "message": "以下筛选条件已自动识别，请确认分析维度：",
+            "dimension_guidance": dimension_guidance,
         }
         return {
             "filter_indicators": filter_indicators,
@@ -681,6 +683,7 @@ def wait_for_confirmation(state: AgentState) -> dict:
             "filter_display": pending_conf.get("filter_display", []),
             "dimension_options": pending_conf.get("dimension_options", []),
             "normalized_question": pending_conf.get("normalized_question", ""),
+            "dimension_guidance": state.get("dimension_guidance"),  # Jaccard 勾选引导
             "action_required": "请选择要进入分析的维度（可多选），然后点击继续；或修改问题后重新提交",
         }
         user_input = interrupt(interrupt_data)
