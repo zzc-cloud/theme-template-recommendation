@@ -99,7 +99,6 @@ def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[flo
         payload = {
             "model": config.EMBEDDING_MODEL,
             "input": batch,
-            "dimensions": config.EMBEDDING_DIM,
         }
 
         last_exc: Exception | None = None

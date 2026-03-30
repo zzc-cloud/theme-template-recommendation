@@ -63,7 +63,7 @@ EMBEDDING_MODEL: str = os.getenv(
     "EMBEDDING_MODEL",
     "Qwen/Qwen3-Embedding-8B",
 )
-EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
+EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "4096"))
 
 # LLM 模型（用于推理，SiliconFlow）
 LLM_MODEL: str = os.getenv(

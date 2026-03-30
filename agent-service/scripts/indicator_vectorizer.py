@@ -121,7 +121,6 @@ def get_embedding_batch(
         payload = {
             "model": EMBEDDING_MODEL,
             "input": batch,
-            "dimensions": EMBEDDING_DIM,
         }
 
         last_exc: Exception | None = None
@@ -357,7 +356,6 @@ def vectorize_and_store(rebuild: bool = False) -> None:
         payload = {
             "model": EMBEDDING_MODEL,
             "input": batch_texts,
-            "dimensions": EMBEDDING_DIM,
         }
         headers = {
             "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
