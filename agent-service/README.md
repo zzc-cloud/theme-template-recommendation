@@ -385,6 +385,7 @@ data: {"event_type": "final", "data": {...}, "timestamp": 1710000005.0}
 | `EMBEDDING_DIM` | 1024 | Embedding 向量维度 |
 | `CHROMA_PATH` | 自动推断 | Chroma 向量库路径 |
 | `VECTOR_SEARCH_TOP_K` | 20 | 向量搜索返回数量 |
+| `JACCARD_SIMILARITY_THRESHOLD` | 0.5 | Jaccard 相似度阈值（维度两两均 >= 此值时提示可全部勾选） |
 | `MAX_ITERATION_ROUNDS` | 5 | 最大迭代轮次 |
 | `CONVERGENCE_SIMILARITY_THRESHOLD` | 0.80 | 收敛相似度阈值（Top-1 >= 此值则收敛） |
 | `LOW_CONFIDENCE_THRESHOLD` | 与收敛阈值相同 | 低置信度阈值（迭代结束后仍有概念 < 此值则进入低置信度流程） |

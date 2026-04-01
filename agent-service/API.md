@@ -388,6 +388,7 @@ Content-Type: application/json
 ```json
 {
   "has_conflict": true,
+  "can_select_all": false,
   "recommended_first": ["小微企业不良贷款率"],
   "conflict_analysis": "「小微企业不良贷款率」命中10个小微考核及不良统计主题，「贷款五级分类」命中19个信用卡/对公/个人信贷主题。Jaccard=0.00（<0.5），主题几乎无交集，存在严重主题交叉干扰",
   "selection_advice": "建议优先勾选「小微企业不良贷款率」，确认推荐结果满意后再考虑补充其他维度",
@@ -416,7 +417,8 @@ Content-Type: application/json
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `has_conflict` | bool | 是否存在主题交叉冲突（基于 Jaccard < 0.5 判定） |
+| `has_conflict` | bool | 是否存在主题交叉冲突（基于 Jaccard < 阈值判定，默认 0.5） |
+| `can_select_all` | bool | 所有维度是否可以全部勾选（Jaccard 均 >= 阈值） |
 | `recommended_first` | array\<string\> | 建议优先勾选的核心维度（按优先级排序），取 `dimension_analysis` 中 `recommendation="优先"` 的维度 |
 | `conflict_analysis` | string | 维度间主题冲突的专业分析（可展示给高级用户参考），应包含 Jaccard 数值 |
 | `selection_advice` | string | 面向用户的简洁勾选建议（1-2句话，直接展示在界面上） |
@@ -430,11 +432,11 @@ Content-Type: application/json
 
 **前端展示建议**：
 
-- `has_conflict == true` 时，在维度选择区顶部展示引导卡片：
+- `can_select_all == true` 时，可在引导卡片中展示"所有维度主题高度重叠，可以全部勾选"
+- `can_select_all == false` 时，在维度选择区顶部展示引导卡片：
   - 高亮 `recommended_first` 中的维度（推荐优先勾选）
   - 展示 `selection_advice` 作为提示文案
   - `conflict_analysis` 可折叠展示（面向高级用户）
-- `has_conflict == false` 时，`dimension_guidance` 存在但无需特殊展示，用户可按默认顺序勾选
 - 单维度场景下 `dimension_guidance` 不会出现（无需引导）
 
 > **实现说明**：`dimension_guidance` 由服务端 LLM 自动生成，生成失败时不阻塞流程（返回 null）。前端应做好 `dimension_guidance` 字段可能不存在的容错处理。
