@@ -21,6 +21,8 @@ from .nodes import (
     format_output,
     generate_summary,
     judge_themes,
+    merge_themes,
+    navigate_hierarchy,
     retrieve_templates,
     wait_for_confirmation,
 )
@@ -51,7 +53,7 @@ def build_agent_graph(
 
     流程：
     Stage 0: extract_phrases → classify_and_iterate
-    Stage 1: aggregate_themes → complete_indicators → judge_themes
+    Stage 1: aggregate_themes → navigate_hierarchy → merge_themes → complete_indicators → judge_themes
     Stage 2: retrieve_templates → analyze_templates
     Finish:  format_output
     """
@@ -65,6 +67,8 @@ def build_agent_graph(
 
     # Stage 1
     workflow.add_node("aggregate_themes", aggregate_themes)
+    workflow.add_node("navigate_hierarchy", navigate_hierarchy)  # 双路径探查
+    workflow.add_node("merge_themes", merge_themes)             # 双路径结果合并去重
     workflow.add_node("complete_indicators", complete_indicators)
     workflow.add_node("judge_themes", judge_themes)
 
@@ -81,7 +85,9 @@ def build_agent_graph(
     workflow.add_edge("extract_phrases", "classify_and_iterate")
     workflow.add_edge("classify_and_iterate", "wait_for_confirmation")
     workflow.add_edge("wait_for_confirmation", "aggregate_themes")
-    workflow.add_edge("aggregate_themes", "complete_indicators")
+    workflow.add_edge("aggregate_themes", "navigate_hierarchy")
+    workflow.add_edge("navigate_hierarchy", "merge_themes")
+    workflow.add_edge("merge_themes", "complete_indicators")
     workflow.add_edge("complete_indicators", "judge_themes")
     workflow.add_edge("judge_themes", "retrieve_templates")
     workflow.add_edge("retrieve_templates", "analyze_templates")

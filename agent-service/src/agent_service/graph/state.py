@@ -26,6 +26,7 @@ class AnalysisDimension(TypedDict):
     """分析维度"""
     search_term: str
     converged: bool
+    deviation_warning: bool  # 新增：偏离度警告
     indicators: list[IndicatorMatch]
 
 
@@ -53,7 +54,21 @@ class ThemeCandidate(TypedDict):
     theme_level: int
     theme_path: str
     frequency: int
+    weighted_frequency: float  # 新增：相似度加权频次
     matched_indicator_ids: list[str]
+
+
+class NavigationPathTheme(TypedDict):
+    """层级导航候选主题"""
+    theme_id: str
+    theme_alias: str
+    theme_level: int
+    depth: int
+    parent_alias: str
+    parent_type: str
+    full_path: str
+    sector_id: str
+    sector_alias: str
 
 
 class RecommendedTheme(TypedDict):
@@ -155,7 +170,9 @@ class AgentState(TypedDict):
 
     # ── 阶段 1 产物 ──
     candidate_themes: list[ThemeCandidate]     # 候选主题
+    navigation_path_themes: list[NavigationPathTheme]  # 新增：层级导航候选主题
     recommended_themes: list[RecommendedTheme] # 推荐主题（含裁决）
+    convergence_rate: float                  # 新增：收敛率 = 已收敛概念数 / 原始概念总数
 
     # ── 阶段 2 产物 ──
     recommended_templates: list[RecommendedTemplate]  # 推荐模板

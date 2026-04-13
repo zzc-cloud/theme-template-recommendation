@@ -28,6 +28,8 @@ from .models import (
     ThemeJudgment,
     TemplateUsability,
     DimensionSelectionGuidance,
+    HierarchyNavigationResult,
+    ConvergenceCheckResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -609,6 +611,38 @@ def analyze_template_usability(
         missing_indicators_str=missing_indicators_str,
     )
     return invoke_structured(TemplateUsability, system_prompt, user_prompt)
+
+
+def check_convergence(
+    original_concept: str,
+    search_results_str: str,
+) -> ConvergenceCheckResult:
+    """阶段 0.3：反向语义验证（两步收敛验证的第2步）"""
+    from . import prompts as llm_prompts
+
+    system_prompt = "你是一个专业的银行数据分析专家，擅长验证搜索结果是否真正回应了原始概念。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
+    user_prompt = llm_prompts.CONVERGENCE_CHECK_PROMPT.format(
+        original_concept=original_concept,
+        search_results_str=search_results_str,
+    )
+    return invoke_structured(ConvergenceCheckResult, system_prompt, user_prompt)
+
+
+def filter_themes_by_hierarchy(
+    user_question: str,
+    analysis_dimensions_str: str,
+    theme_list_str: str,
+) -> HierarchyNavigationResult:
+    """阶段 1.2：层级导航 - 从板块主题列表中筛选候选主题"""
+    from . import prompts as llm_prompts
+
+    system_prompt = "你是一个专业的银行数据分析专家，擅长从大量主题中筛选与用户需求相关的候选。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
+    user_prompt = llm_prompts.HIERARCHY_NAVIGATION_PROMPT.format(
+        user_question=user_question,
+        analysis_dimensions=analysis_dimensions_str,
+        theme_list_str=theme_list_str,
+    )
+    return invoke_structured(HierarchyNavigationResult, system_prompt, user_prompt)
 
 
 # ─────────────────────────────────────────────

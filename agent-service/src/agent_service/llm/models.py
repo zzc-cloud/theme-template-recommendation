@@ -40,6 +40,10 @@ class IterationRefinementResult(BaseModel):
         default="",
         description="诊断说明，用于调试和日志"
     )
+    deviation_warning: bool = Field(
+        default=False,
+        description="是否触发偏离度警告"
+    )
 
 
 class NormalizedQuestionResult(BaseModel):
@@ -135,4 +139,35 @@ class TemplateUsability(BaseModel):
     missing_indicator_analysis: list[MissingIndicatorAnalysis] = Field(
         default_factory=list,
         description="缺失指标分析列表"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 层级导航 & 收敛验证模型
+# ═══════════════════════════════════════════════════════════════════════
+
+class HierarchyNavigationTheme(BaseModel):
+    """层级导航候选主题（LLM 筛选结果）"""
+    theme_id: str = Field(description="主题ID")
+    theme_alias: str = Field(description="主题名称")
+    theme_path: str = Field(description="主题完整路径")
+    reason: str = Field(default="", description="选择理由")
+
+
+class HierarchyNavigationResult(BaseModel):
+    """层级导航 LLM 筛选结果"""
+    selected_themes: list[HierarchyNavigationTheme] = Field(
+        default_factory=list,
+        description="选中的候选主题列表"
+    )
+
+
+class ConvergenceCheckResult(BaseModel):
+    """反向语义验证结果"""
+    is_valid_convergence: bool = Field(
+        description="搜索结果是否真正回应了原始概念"
+    )
+    reason: str = Field(
+        default="",
+        description="验证理由"
     )

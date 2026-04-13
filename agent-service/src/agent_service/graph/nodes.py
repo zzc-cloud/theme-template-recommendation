@@ -321,12 +321,14 @@ def classify_and_iterate(state: AgentState) -> dict:
         analysis_dimensions.append({
             "search_term": concept,
             "converged": True,
+            "deviation_warning": False,  # 新增：已收敛的概念默认无偏离
             "indicators": indicators,
         })
     for concept, indicators in pending_concepts.items():
         analysis_dimensions.append({
             "search_term": concept,
             "converged": False,
+            "deviation_warning": False,
             "indicators": indicators,
         })
 
@@ -442,13 +444,209 @@ def classify_and_iterate(state: AgentState) -> dict:
 # 阶段 1 节点
 # ═══════════════════════════════════════════════════════════════════════
 
+def navigate_hierarchy(state: AgentState) -> dict:
+    """阶段 1.2：双路径并行探查 - 层级导航
+
+    路径A（统计聚合）→ ─┐
+                        ├──→ 候选主题合并去重
+    路径B（层级导航）→ ─┘
+
+    实现步骤：
+    1. 调用 get_sectors_from_root() 获取所有板块
+    2. 对每个板块调用 get_sector_themes() 批量获取主题
+    3. LLM 在批量结果中筛选与用户需求相关的候选主题
+    """
+    user_question = state["user_question"]
+    analysis_dimensions = state.get("analysis_dimensions", [])
+    writer = get_stream_writer()
+
+    writer({"stage": "navigate_hierarchy", "step": "fetching_sectors", "status": "in_progress"})
+
+    # Step 1: 获取所有板块
+    sectors_result = theme_tools.get_sectors_from_root()
+    if not sectors_result.get("success"):
+        logger.warning(f"获取板块列表失败: {sectors_result.get('error')}")
+        return {"navigation_path_themes": []}
+
+    sectors = sectors_result.get("sectors", [])
+    writer({
+        "stage": "navigate_hierarchy",
+        "step": "sectors_loaded",
+        "sector_count": len(sectors),
+    })
+
+    # Step 2: 批量获取每个板块下的主题
+    all_sector_themes: list[dict] = []
+    for sector in sectors:
+        sector_id = sector.get("id")
+        sector_alias = sector.get("alias")
+        if not sector_id:
+            continue
+
+        sector_themes_result = theme_tools.get_sector_themes(sector_id, top_k=50)
+        if sector_themes_result.get("success"):
+            for theme in sector_themes_result.get("themes", []):
+                theme["sector_id"] = sector_id
+                theme["sector_alias"] = sector_alias
+                all_sector_themes.append(theme)
+
+    writer({
+        "stage": "navigate_hierarchy",
+        "step": "themes_loaded",
+        "total_themes": len(all_sector_themes),
+    })
+
+    if not all_sector_themes:
+        return {"navigation_path_themes": []}
+
+    # Step 3: 构建主题列表字符串用于 LLM 筛选
+    theme_list_parts = []
+    for theme in all_sector_themes[:200]:  # 限制最多 200 个主题
+        theme_list_parts.append(
+            f"- 板块: {theme.get('sector_alias', '')} | "
+            f"主题: {theme.get('theme_alias', '')} | "
+            f"路径: {theme.get('full_path', '')}"
+        )
+    theme_list_str = "\n".join(theme_list_parts)
+
+    # Step 4: 构建分析维度字符串
+    dim_str = _build_analysis_dimensions_str(analysis_dimensions)
+
+    # Step 5: LLM 筛选候选主题
+    try:
+        writer({"stage": "navigate_hierarchy", "step": "llm_filtering", "status": "in_progress"})
+        navigation_result = llm_client.filter_themes_by_hierarchy(
+            user_question=user_question,
+            analysis_dimensions_str=dim_str,
+            theme_list_str=theme_list_str,
+        )
+
+        selected_themes = navigation_result.selected_themes
+
+        # Step 6: 构建 navigation_path_themes
+        navigation_path_themes = []
+        selected_ids = {t.theme_id for t in selected_themes}
+
+        for theme in all_sector_themes:
+            if theme.get("theme_id") in selected_ids:
+                navigation_path_themes.append({
+                    "theme_id": theme.get("theme_id", ""),
+                    "theme_alias": theme.get("theme_alias", ""),
+                    "theme_level": theme.get("theme_level", 0),
+                    "depth": theme.get("depth", 0),
+                    "parent_alias": theme.get("parent_alias", ""),
+                    "parent_type": theme.get("parent_type", ""),
+                    "full_path": theme.get("full_path", ""),
+                    "sector_id": theme.get("sector_id", ""),
+                    "sector_alias": theme.get("sector_alias", ""),
+                })
+
+        writer({
+            "stage": "navigate_hierarchy",
+            "step": "completed",
+            "selected_count": len(navigation_path_themes),
+        })
+        return {"navigation_path_themes": navigation_path_themes}
+
+    except Exception as e:
+        logger.warning(f"层级导航 LLM 筛选失败: {e}")
+        return {"navigation_path_themes": []}
+
+def merge_themes(state: AgentState) -> dict:
+    """阶段 1.1.5: 合并去重 - 聚合路径 + 层级导航路径的结果合并
+
+    合并策略：
+    1. 以聚合路径 (candidate_themes) 为主，保留频次和 matched_indicator_ids
+    2. 层级导航路径 (navigation_path_themes) 补充不在聚合结果中的主题
+    3. 去重后按 weighted_frequency 降序排列
+    4. 取 top_k 个主题
+
+    输出格式与 candidate_themes 一致，确保后续节点兼容
+    """
+    candidate_themes = state.get("candidate_themes", [])
+    navigation_themes = state.get("navigation_path_themes", [])
+    top_k = state.get("top_k_themes", 3)
+    writer = get_stream_writer()
+
+    writer({
+        "stage": "merge_themes",
+        "step": "merging",
+        "aggregate_count": len(candidate_themes),
+        "navigation_count": len(navigation_themes),
+    })
+
+    # 聚合路径结果按 theme_id 建立索引
+    theme_map: dict = {}
+    for theme in candidate_themes:
+        theme_id = theme.get("theme_id", "")
+        if theme_id:
+            theme_map[theme_id] = {
+                "theme_id": theme_id,
+                "theme_alias": theme.get("theme_alias", ""),
+                "theme_level": theme.get("theme_level", 0),
+                "theme_path": theme.get("theme_path", ""),
+                "frequency": theme.get("frequency", 0),
+                "weighted_frequency": theme.get("weighted_frequency", 0.0),
+                "matched_indicator_ids": theme.get("matched_indicator_ids", []),
+                "source": "aggregate",
+            }
+
+    # 补充层级导航路径的主题
+    nav_ids = set(theme_map.keys())
+    for nav_theme in navigation_themes:
+        theme_id = nav_theme.get("theme_id", "")
+        if theme_id and theme_id not in nav_ids:
+            theme_map[theme_id] = {
+                "theme_id": theme_id,
+                "theme_alias": nav_theme.get("theme_alias", ""),
+                "theme_level": nav_theme.get("theme_level", 0),
+                "theme_path": nav_theme.get("full_path", ""),
+                "frequency": 0,
+                "weighted_frequency": 0.0,
+                "matched_indicator_ids": [],
+                "source": "navigation",
+            }
+
+    # 按 weighted_frequency 降序排列，取 top_k
+    merged = sorted(
+        theme_map.values(),
+        key=lambda x: x.get("weighted_frequency", 0.0),
+        reverse=True,
+    )[:top_k]
+
+    writer({
+        "stage": "merge_themes",
+        "step": "completed",
+        "merged_count": len(merged),
+    })
+
+    # 返回 candidate_themes 格式，兼容后续节点
+    return {"candidate_themes": merged}
+
+
 def aggregate_themes(state: AgentState) -> dict:
-    """阶段 1.1：聚合候选主题"""
-    matched_indicators = []
-    for dim in state.get("analysis_dimensions", []):
+    """阶段 1.1：聚合候选主题（相似度加权）
+
+    改进点：
+    1. 按相似度加权频次（weighted_frequency = Σ indicator_similarity_score）
+    2. 指标去重：同一 indicator_id 取最大相似度
+    3. 按 weighted_frequency 降序排列
+    """
+    analysis_dimensions = state.get("analysis_dimensions", [])
+
+    # Step 1: 构建指标 ID → 最大相似度的映射（去重）
+    # 注意：similarity_score 在 IndicatorMatch 级别（即 ind["similarity_score"]）
+    indicator_max_sim: dict[str, float] = {}
+    for dim in analysis_dimensions:
         for ind in dim.get("indicators", []):
-            if ind["id"] and ind["id"] not in matched_indicators:
-                matched_indicators.append(ind["id"])
+            ind_id = ind.get("id", "")
+            if ind_id:
+                sim_score = ind.get("similarity_score", 0.0)
+                # 同一指标取最大相似度
+                if ind_id not in indicator_max_sim or sim_score > indicator_max_sim[ind_id]:
+                    indicator_max_sim[ind_id] = sim_score
+
+    matched_indicators = list(indicator_max_sim.keys())
 
     if not matched_indicators:
         return {"candidate_themes": []}
@@ -458,7 +656,22 @@ def aggregate_themes(state: AgentState) -> dict:
     )
 
     if result.get("success"):
-        return {"candidate_themes": result.get("candidate_themes", [])}
+        candidate_themes = result.get("candidate_themes", [])
+
+        # Step 2: 计算每个主题的 weighted_frequency
+        for theme in candidate_themes:
+            total_weight = 0.0
+            for ind_id in theme.get("matched_indicator_ids", []):
+                total_weight += indicator_max_sim.get(ind_id, 0.0)
+            theme["weighted_frequency"] = round(total_weight, 4)
+
+        # Step 3: 按 weighted_frequency 降序排列（已在工具层按频次排，这里重排）
+        candidate_themes.sort(
+            key=lambda x: x.get("weighted_frequency", 0.0),
+            reverse=True,
+        )
+
+        return {"candidate_themes": candidate_themes}
     else:
         return {
             "candidate_themes": [],
