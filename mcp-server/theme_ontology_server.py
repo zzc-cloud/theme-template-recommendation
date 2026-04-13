@@ -412,6 +412,140 @@ def get_theme_analysis_indicators(theme_id: str) -> str:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
+# ==================== 批量指标-主题映射 ====================
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def batch_get_indicator_themes(indicator_ids: list, top_k: int = 20) -> str:
+    """批量获取指标列表各自归属的 THEME 信息（去重）
+
+    一次 Cypher 查询返回所有指标的 THEME 归属，避免逐指标循环查询。
+    用于阶段 0.4 勾选引导的 Jaccard 相似度计算。
+
+    Args:
+        indicator_ids: 指标 ID 列表（来自阶段 0 的 matched_indicators）
+        top_k: 每个维度最多返回的 theme 数量，默认 20
+
+    Returns:
+        {
+            "success": true,
+            "indicator_count": 10,
+            "results": [
+                {
+                    "indicator_id": "INDICATOR.xxx",
+                    "themes": [
+                        {
+                            "theme_id": "THEME.xxx",
+                            "theme_alias": "主题别名",
+                            "theme_path": "自主分析 > 板块 > 主题",
+                            "frequency": 3
+                        }
+                    ]
+                }
+            ],
+            "execution_time_ms": 120.5
+        }
+
+    说明：
+    - 如果一个指标属于多个 THEME（通过不同路径可达），每个 THEME 均返回
+    - 同一 indicator_id 的 themes 按 frequency（该指标在该 theme 下的命中频次）降序
+    - 不同 indicator_id 的 results 顺序与输入 indicator_ids 一致
+    """
+    start = time.time()
+    try:
+        # 限制参数
+        indicator_ids = indicator_ids[:100] if indicator_ids else []
+        top_k = min(max(1, top_k), 50)
+
+        if not indicator_ids:
+            return json.dumps({
+                "success": True,
+                "indicator_count": 0,
+                "results": [],
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+
+        with get_driver().session() as session:
+            business_labels = ['SECTOR', 'CATEGORY', 'THEME', 'SUBPATH', 'INDICATOR',
+                               'INSIGHT_TEMPLATE', 'COMBINEDQUERY_TEMPLATE']
+
+            # 批量查询：所有指标共享一次图遍历
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(indicator)
+            WHERE entry.alias = '自主分析'
+              AND indicator.id IN $indicator_ids
+              AND labels(entry)[0] IN $business_labels
+              AND labels(indicator)[0] IN $business_labels
+            RETURN indicator.id as indicator_id,
+                   [node in nodes(path) | {
+                       id: node.id,
+                       alias: node.alias,
+                       type: labels(node)[0],
+                       level: node.level
+                   }] as path_nodes
+            """
+            result = session.run(
+                cypher,
+                indicator_ids=indicator_ids,
+                business_labels=business_labels
+            )
+
+            # 按 indicator_id 分组，收集每个指标的所有路径
+            indicator_paths: dict = {}
+            for row in result:
+                ind_id = row["indicator_id"]
+                if ind_id not in indicator_paths:
+                    indicator_paths[ind_id] = []
+                indicator_paths[ind_id].append(row["path_nodes"])
+
+            # 构建每个指标的 theme 映射
+            results = []
+            for indicator_id in indicator_ids:
+                paths = indicator_paths.get(indicator_id, [])
+                theme_map = {}
+
+                for path_nodes in paths:
+                    # 在路径中找 THEME 节点
+                    for i, node in enumerate(path_nodes):
+                        if node["type"] == "THEME":
+                            theme_id = node["id"]
+                            if theme_id not in theme_map:
+                                # 构建从"自主分析"到该 THEME 的路径
+                                theme_path_aliases = []
+                                for j in range(i + 1):
+                                    if path_nodes[j]["type"] != "INDICATOR":
+                                        theme_path_aliases.append(path_nodes[j]["alias"])
+                                theme_map[theme_id] = {
+                                    "theme_id": theme_id,
+                                    "theme_alias": node["alias"],
+                                    "theme_path": " > ".join(theme_path_aliases),
+                                    "frequency": 0
+                                }
+                            theme_map[theme_id]["frequency"] += 1
+
+                # 按 frequency 降序，取 top_k
+                themes = sorted(
+                    theme_map.values(),
+                    key=lambda x: x["frequency"],
+                    reverse=True
+                )[:top_k]
+
+                results.append({
+                    "indicator_id": indicator_id,
+                    "themes": themes
+                })
+
+            return json.dumps({
+                "success": True,
+                "indicator_count": len(results),
+                "results": results,
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
 # ==================== 主题聚合工具 ====================
 
 
@@ -660,6 +794,497 @@ def aggregate_themes_from_indicators(matched_indicators: list, top_k: int = 3) -
             "total_indicators": len(matched_indicators),
             "execution_time_ms": round((time.time() - start) * 1000, 2)
         }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ==================== 层级导航工具 ====================
+
+_ROOT_ENTRY_ALIAS = "自主分析"
+_NAVIGABLE_LABELS = ["SECTOR", "CATEGORY", "SUBPATH", "THEME"]
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_sector_themes(
+    sector_id: str,
+    top_k: int = 100
+) -> str:
+    """获取指定板块下所有层级的 THEME 节点（批量一次查询）
+
+    直接查询指定 SECTOR 下所有深度的 THEME 节点，无需逐层探索。
+    用于主题模板推荐 Skill 阶段 1.2 层级导航。
+
+    Args:
+        sector_id: SECTOR 节点 ID
+        top_k: 返回主题数量上限，默认 100，最大 500
+
+    Returns:
+        {
+            "success": true,
+            "sector_id": "SECTOR.xxx",
+            "sector_alias": "资产板块",
+            "themes": [
+                {
+                    "theme_id": "THEME.xxx",
+                    "theme_alias": "对公贷款借据",
+                    "theme_level": 5,
+                    "depth": 4,
+                    "parent_alias": "对公贷款",
+                    "parent_type": "CATEGORY",
+                    "full_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据"
+                }
+            ],
+            "total_themes": 52,
+            "execution_time_ms": 45.2
+        }
+    """
+    start = time.time()
+    try:
+        top_k = min(max(1, top_k), 500)
+
+        with get_driver().session() as session:
+            # 先获取板块信息
+            sector_info_cypher = """
+            MATCH (sector:SECTOR {id: $sector_id})
+            RETURN sector.id as id, sector.alias as alias,
+                   sector.level as level, sector.path as path
+            """
+            sector_result = session.run(sector_info_cypher, sector_id=sector_id).single()
+
+            if not sector_result:
+                return json.dumps({
+                    "success": False,
+                    "error": f"未找到板块 {sector_id}",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+
+            # 批量获取所有主题（含完整路径）
+            themes_cypher = """
+            MATCH path = (sector:SECTOR {id: $sector_id})-[:HAS_CHILD*]->(theme:THEME)
+            MATCH (theme)<-[:HAS_CHILD]-(parent_node)
+            WHERE labels(parent_node)[0] IN ['CATEGORY', 'SUBPATH', 'THEME']
+
+            WITH sector, theme, parent_node, nodes(path) as path_nodes,
+                 [n IN nodes(path) WHERE labels(n)[0] <> 'INDICATOR'] as non_ind_nodes
+
+            WITH sector, theme, parent_node, non_ind_nodes,
+                 reduce(s = '', item IN [n IN non_ind_nodes | n.alias] | s + CASE WHEN s = '' THEN item ELSE ' > ' + item END) as full_path,
+                 size(non_ind_nodes) as depth
+
+            RETURN
+                theme.id as theme_id,
+                theme.alias as theme_alias,
+                theme.level as theme_level,
+                labels(parent_node)[0] as parent_type,
+                parent_node.alias as parent_alias,
+                parent_node.id as parent_id,
+                depth,
+                full_path
+            ORDER BY theme_alias
+            LIMIT $top_k
+            """
+            result = session.run(themes_cypher, sector_id=sector_id, top_k=top_k)
+
+            themes = []
+            for row in result:
+                themes.append({
+                    "theme_id": row["theme_id"],
+                    "theme_alias": row["theme_alias"],
+                    "theme_level": row["theme_level"],
+                    "depth": row["depth"],
+                    "parent_alias": row["parent_alias"],
+                    "parent_type": row["parent_type"],
+                    "full_path": row["full_path"]
+                })
+
+            # 获取总数（用于判断是否截断）
+            count_cypher = """
+            MATCH (sector:SECTOR {id: $sector_id})-[:HAS_CHILD*]->(theme:THEME)
+            RETURN count(theme) as total
+            """
+            count_result = session.run(count_cypher, sector_id=sector_id).single()
+            total = count_result["total"] if count_result else 0
+
+            return json.dumps({
+                "success": True,
+                "sector_id": sector_result["id"],
+                "sector_alias": sector_result["alias"],
+                "sector_path": sector_result["path"].replace(".", " > "),
+                "themes": themes,
+                "total_themes": total,
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "execution_time_ms": round((time.time() - start) * 1000, 2)
+        }, ensure_ascii=False)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_sectors_from_root() -> str:
+    """获取"自主分析"下的所有 SECTOR（板块）节点
+
+    用于层级导航的起点，展示所有可探索的板块。
+
+    Returns:
+        {
+            "success": true,
+            "root_alias": "自主分析",
+            "sectors": [
+                {
+                    "id": "SECTOR.xxx",
+                    "alias": "资产板块",
+                    "level": 2,
+                    "path": "自主分析 > 资产板块",
+                    "direct_child_count": 5,
+                    "has_theme_children": true
+                }
+            ],
+            "total_sectors": 6,
+            "execution_time_ms": 45.2
+        }
+    """
+    start = time.time()
+    try:
+        with get_driver().session() as session:
+            cypher = """
+            MATCH (root:CATEGORY {alias: $root_alias})-[:HAS_CHILD]->(s:SECTOR)
+            OPTIONAL MATCH (s)-[:HAS_CHILD]->(c)
+            WITH s, count(DISTINCT c) as direct_child_count
+            OPTIONAL MATCH (s)-[:HAS_CHILD*1..]->(t:THEME)
+            WITH s, direct_child_count, count(DISTINCT t) as theme_child_count
+            RETURN s.id as id, s.alias as alias, s.level as level,
+                   s.path as path,
+                   direct_child_count,
+                   theme_child_count > 0 as has_theme_children
+            ORDER BY s.alias
+            """
+            result = session.run(cypher, root_alias=_ROOT_ENTRY_ALIAS)
+
+            sectors = []
+            for row in result:
+                sectors.append({
+                    "id": row["id"],
+                    "alias": row["alias"],
+                    "level": row["level"],
+                    "path": row["path"],
+                    "direct_child_count": row["direct_child_count"] or 0,
+                    "has_theme_children": row["has_theme_children"]
+                })
+
+            return json.dumps({
+                "success": True,
+                "root_alias": _ROOT_ENTRY_ALIAS,
+                "sectors": sectors,
+                "total_sectors": len(sectors),
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_children_of_node(
+    parent_id: str,
+    type_filter: str = None,
+    include_sibling_themes: bool = False,
+    top_k: int = 50
+) -> str:
+    """获取指定节点的直接子节点
+
+    用于层级导航中的逐层向下探索。可按节点类型过滤，
+    并可选返回同级 THEMEs 以便对比选择。
+
+    Args:
+        parent_id: 父节点 ID（如 SECTOR.xxx 或 CATEGORY.xxx）
+        type_filter: 节点类型过滤，可选值：
+            SECTOR / CATEGORY / SUBPATH / THEME
+            若为 None，则返回所有类型的子节点
+        include_sibling_themes: 是否返回父节点下的所有 THEME 兄弟节点，
+            当 type_filter='THEME' 时生效，用于展示同级的候选主题供对比
+        top_k: 返回数量上限（仅对 sibling_themes 生效），默认 50
+
+    Returns:
+        {
+            "success": true,
+            "parent_id": "SECTOR.xxx",
+            "parent_alias": "资产板块",
+            "parent_type": "SECTOR",
+            "parent_path": "自主分析 > 资产板块",
+            "children": [
+                {
+                    "id": "CATEGORY.xxx",
+                    "alias": "对公贷款",
+                    "type": "CATEGORY",
+                    "level": 3,
+                    "path": "自主分析 > 资产板块 > 对公贷款",
+                    "direct_child_count": 12,
+                    "has_theme_children": true,
+                    "has_leaf_children": false
+                }
+            ],
+            "sibling_themes": [],
+            "total_children": 8,
+            "has_more": false,
+            "execution_time_ms": 45.2
+        }
+    """
+    start = time.time()
+    try:
+        top_k = min(max(1, top_k), 100)
+
+        with get_driver().session() as session:
+            # 先获取父节点信息
+            parent_info_cypher = """
+            MATCH (parent {id: $parent_id})
+            RETURN parent.id as id, parent.alias as alias,
+                   labels(parent)[0] as type, parent.level as level,
+                   parent.path as path
+            """
+            parent_result = session.run(parent_info_cypher, parent_id=parent_id).single()
+
+            if not parent_result:
+                return json.dumps({
+                    "success": False,
+                    "error": f"未找到节点 {parent_id}",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+
+            # 构建子节点查询
+            if type_filter and type_filter in _NAVIGABLE_LABELS:
+                child_where = f"labels(child)[0] = '{type_filter}'"
+            else:
+                labels_str = str(_NAVIGABLE_LABELS).replace("'", '"')
+                child_where = f"labels(child)[0] IN {labels_str}"
+
+            children_cypher = f"""
+            MATCH (parent {{id: $parent_id}})-[:HAS_CHILD]->(child)
+            WHERE {child_where}
+            OPTIONAL MATCH (child)-[:HAS_CHILD]->(gc)
+            WITH child, count(DISTINCT gc) as direct_child_count
+            OPTIONAL MATCH (child)-[:HAS_CHILD*1..]->(t:THEME)
+            WITH child, direct_child_count, count(DISTINCT t) as theme_child_count
+            OPTIONAL MATCH (child)-[:HAS_CHILD*1..]->(i:INDICATOR)
+            WITH child, direct_child_count, theme_child_count, count(DISTINCT i) as leaf_count
+            RETURN child.id as id, child.alias as alias, labels(child)[0] as type,
+                   child.level as level, child.path as path,
+                   direct_child_count,
+                   theme_child_count > 0 as has_theme_children,
+                   leaf_count > 0 as has_leaf_children
+            ORDER BY child.alias
+            LIMIT $top_k
+            """
+
+            result = session.run(children_cypher, parent_id=parent_id, top_k=top_k)
+
+            children = []
+            for row in result:
+                children.append({
+                    "id": row["id"],
+                    "alias": row["alias"],
+                    "type": row["type"],
+                    "level": row["level"],
+                    "path": row["path"],
+                    "direct_child_count": row["direct_child_count"] or 0,
+                    "has_theme_children": row["has_theme_children"],
+                    "has_leaf_children": row["has_leaf_children"]
+                })
+
+            has_more = len(children) == top_k
+
+            # 可选获取父节点下的所有 THEME 兄弟节点
+            sibling_themes = []
+            if include_sibling_themes:
+                sibling_cypher = """
+                MATCH (parent {id: $parent_id})-[:HAS_CHILD]->(t:THEME)
+                RETURN t.id as id, t.alias as alias, t.level as level, t.path as path
+                ORDER BY t.alias
+                LIMIT $top_k
+                """
+                sibling_result = session.run(sibling_cypher, parent_id=parent_id, top_k=top_k)
+                for row in sibling_result:
+                    sibling_themes.append({
+                        "id": row["id"],
+                        "alias": row["alias"],
+                        "level": row["level"],
+                        "path": row["path"]
+                    })
+
+            return json.dumps({
+                "success": True,
+                "parent_id": parent_result["id"],
+                "parent_alias": parent_result["alias"],
+                "parent_type": parent_result["type"],
+                "parent_level": parent_result["level"],
+                "parent_path": parent_result["path"],
+                "children": children,
+                "sibling_themes": sibling_themes,
+                "total_children": len(children),
+                "has_more": has_more,
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_path_to_theme(
+    theme_id: str,
+    include_siblings: bool = True
+) -> str:
+    """获取从"自主分析"到指定主题的完整导航路径
+
+    返回路径上的所有中间节点，并为每个非叶子层级提供同级兄弟节点，
+    使 LLM 能够理解该主题在整个层级中的位置和相邻主题。
+
+    Args:
+        theme_id: THEME 节点 ID
+        include_siblings: 是否返回同级 THEMEs，默认 True
+
+    Returns:
+        {
+            "success": true,
+            "theme_id": "THEME.xxx",
+            "theme_alias": "对公贷款借据",
+            "depth": 4,
+            "full_path": "自主分析 > 资产板块 > 对公贷款 > 对公贷款借据",
+            "path_nodes": [
+                {
+                    "alias": "自主分析",
+                    "type": "CATEGORY",
+                    "level": 1,
+                    "is_entry": true
+                },
+                {
+                    "alias": "资产板块",
+                    "type": "SECTOR",
+                    "level": 2
+                },
+                {
+                    "alias": "对公贷款",
+                    "type": "CATEGORY",
+                    "level": 3
+                },
+                {
+                    "alias": "对公贷款借据",
+                    "type": "THEME",
+                    "level": 5,
+                    "is_target": true,
+                    "direct_parent_alias": "对公贷款",
+                    "direct_parent_type": "CATEGORY"
+                }
+            ],
+            "sibling_themes": [
+                {"id": "THEME.yyy", "alias": "对公贷款客户风险", "level": 4}
+            ],
+            "sibling_theme_count": 1,
+            "execution_time_ms": 45.2
+        }
+    """
+    start = time.time()
+    try:
+        with get_driver().session() as session:
+            cypher = """
+            MATCH path = (entry)-[:HAS_CHILD*]->(theme:THEME {id: $theme_id})
+            WHERE entry.alias = $root_alias
+              AND labels(entry)[0] IN $business_labels
+            RETURN [node in nodes(path) | {
+                id: node.id,
+                alias: node.alias,
+                type: labels(node)[0],
+                level: node.level
+            }] as path_nodes,
+               length(path) as depth
+            """
+            result = session.run(
+                cypher, theme_id=theme_id, root_alias=_ROOT_ENTRY_ALIAS,
+                business_labels=_NAVIGABLE_LABELS
+            ).single()
+
+            if not result:
+                return json.dumps({
+                    "success": False,
+                    "error": f"未找到主题 {theme_id} 的路径",
+                    "execution_time_ms": round((time.time() - start) * 1000, 2)
+                }, ensure_ascii=False)
+
+            path_nodes = result["path_nodes"]
+            depth = result["depth"]
+
+            # 找到 THEME 节点及其在路径中的索引
+            theme_alias = None
+            theme_idx = None
+            parent_id = None
+            parent_alias = None
+            parent_type = None
+
+            for i, node in enumerate(path_nodes):
+                if node["type"] == "THEME" and node["id"] == theme_id:
+                    theme_alias = node["alias"]
+                    theme_idx = i
+                    if i > 0:
+                        parent_id = path_nodes[i - 1]["id"]
+                        parent_alias = path_nodes[i - 1]["alias"]
+                        parent_type = path_nodes[i - 1]["type"]
+                    break
+
+            # 构建 path_nodes 输出，带标记
+            path_node_list = []
+            for i, node in enumerate(path_nodes):
+                node_dict = {
+                    "id": node["id"],
+                    "alias": node["alias"],
+                    "type": node["type"],
+                    "level": node["level"]
+                }
+                if i == 0:
+                    node_dict["is_entry"] = True
+                if node["id"] == theme_id:
+                    node_dict["is_target"] = True
+                    node_dict["direct_parent_id"] = parent_id
+                    node_dict["direct_parent_alias"] = parent_alias
+                    node_dict["direct_parent_type"] = parent_type
+                path_node_list.append(node_dict)
+
+            # 构建完整路径字符串
+            full_path = " > ".join(node["alias"] for node in path_nodes)
+
+            # 获取同级 THEMEs
+            sibling_themes = []
+            if include_siblings and parent_id:
+                sibling_cypher = """
+                MATCH (parent {id: $parent_id})-[:HAS_CHILD]->(t:THEME)
+                WHERE t.id <> $theme_id
+                RETURN t.id as id, t.alias as alias, t.level as level, t.path as path
+                ORDER BY t.alias
+                LIMIT 50
+                """
+                sibling_result = session.run(
+                    sibling_cypher, parent_id=parent_id, theme_id=theme_id
+                )
+                for row in sibling_result:
+                    sibling_themes.append({
+                        "id": row["id"],
+                        "alias": row["alias"],
+                        "level": row["level"],
+                        "path": row["path"]
+                    })
+
+            return json.dumps({
+                "success": True,
+                "theme_id": theme_id,
+                "theme_alias": theme_alias,
+                "theme_level": path_nodes[theme_idx]["level"] if theme_idx is not None else 0,
+                "depth": depth,
+                "full_path": full_path,
+                "path_nodes": path_node_list,
+                "sibling_themes": sibling_themes,
+                "sibling_theme_count": len(sibling_themes),
+                "execution_time_ms": round((time.time() - start) * 1000, 2)
+            }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 

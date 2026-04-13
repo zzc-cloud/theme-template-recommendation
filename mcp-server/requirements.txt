@@ -2,3 +2,8 @@ mcp>=1.0.0
 neo4j>=5.0.0
 pymysql>=1.1.0
 python-dotenv>=1.0.0
+
+# 向量搜索依赖
+chromadb==0.4.24
+numpy==1.24.4
+requests>=2.31.0

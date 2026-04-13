@@ -34,14 +34,6 @@
 
 > **重要**：两个流式接口均返回 SSE 流，不是普通 JSON 响应。前端必须使用流式读取方式处理。
 
-### 同步接口（非流式）
-
-| 接口 | 方法 | 说明 | 何时调用 |
-|------|------|------|----------|
-| `/api/v1/recommend-sync` | POST | 发起推荐，返回完整 JSON | CLI/脚本调用，不需要实时进度 |
-| `/api/v1/resume-sync` | POST | 恢复执行，返回完整 JSON | CLI/脚本调用 |
-
-> **同步接口说明**：与流式接口功能完全相同，但直接返回完整结构化结果。适合 CLI 工具、脚本调用等不需要实时进度反馈的场景。详见 [第13节 同步接口](#13-同步接口非流式)。
 
 ### 健康检查接口
 
@@ -87,35 +79,6 @@ data: {"event_type": "stage_complete", "stage": "extract_phrases", ...}\n
 
 > **重要**：`final` 事件只包含结构化数据（`markdown` 字段为空），自然语言总结内容通过 `summary` 事件在 `final` 之后异步推送。前端收到 `final` 后不应立即关闭 SSE 连接，需继续等待 `summary` 事件。
 
-### 2.4 markdown 字段设计说明
-
-服务端为每个 `progress` 和部分 `stage_complete` 事件预渲染了 Markdown 格式的进度文字，通过 `markdown` 字段传递给前端。
-
-**设计意图**：
-- **零成本渲染**：前端无需自行拼接进度文字，直接将 `markdown` 内容追加到聊天气泡或日志区域即可
-- **渐进式覆盖**：
-  - `stage_complete.markdown` 可能为 `null`，表示该阶段的进度文字已由 `progress` 事件提供（避免重复）
-  - 详见 [5.1 节 stage 值对照表](#51-stage_complete--阶段完成)
-
-**渲染示例**：
-
-```html
-<!-- 直接渲染 markdown 字段 -->
-<div class="progress-log">
-  <pre id="progress-container"></pre>
-</div>
-```
-
-```javascript
-// progress 事件到达时
-const progressContainer = document.getElementById('progress-container');
-progressContainer.textContent += event.markdown + '\n';
-
-// 或追加到聊天记录（支持 Markdown 渲染）
-chatLog.append({ role: 'system', content: event.markdown });
-```
-
----
 
 ## 3. 接口一：发起推荐 /recommend
 
@@ -191,8 +154,7 @@ Content-Type: application/json
 ```json
 {
   "thread_id": "550e8400-e29b-41d4-a716-446655440000",
-  "confirmed_dimensions": ["小微企业贷款", "不良率"],
-  "confirmed_question": "分析南京分行2024年小微企业贷款不良率"
+  "confirmed_dimensions": ["小微企业贷款", "不良率"]
 }
 ```
 
@@ -381,7 +343,7 @@ Content-Type: application/json
 
 > **注意**：`top_indicator_aliases` 是 `top_indicators` 的 alias 提取，两者内容一一对应。
 
-### 5.3.1 dimension_guidance — 维度勾选引导（新增）
+### 5.3.1 dimension_guidance — 维度勾选引导
 
 当 `pending_confirmation` 中包含 `dimension_guidance` 字段时（多维度场景下会自动生成），前端应在维度选择界面上展示引导提示，帮助用户判断应优先勾选哪些维度。
 
@@ -497,9 +459,7 @@ Content-Type: application/json
           }
         ]
       }
-    ],
-    "normalized_question": "分析南京分行2024年小微企业贷款及涉农标识情况"
-  }
+    ]  }
 }
 ```
 
@@ -640,10 +600,7 @@ Content-Type: application/json
 |------|------|------|
 | `content` | string | 自然语言形式的完整总结内容，可直接展示给用户 |
 
-**前端处理建议**：
-1. 收到 `final` 事件后，先展示结构化推荐结果
-2. 继续监听 SSE 流，等待 `summary` 事件
-3. 收到 `summary` 后，将 `content` 内容追加到结果区域或聊天记录
+
 
 ### 5.6 error — 错误
 
@@ -1116,251 +1073,8 @@ curl http://localhost:8000/health
 
 ---
 
-## 12. 完整调用示例
+## 12. thread_id 生命周期速查
 
-### TypeScript/JavaScript 完整示例
-
-```typescript
-class RecommendClient {
-  private currentThreadId: string | null = null;
-  private state: string = 'idle';
-  // 用于追问的会话摘要
-  private lastSession: {
-    normalizedQuestion: string;
-    filterIndicators: Array<{ alias: string; value: string }>;
-    dimensions: string[];
-  } | null = null;
-
-  // ── 工具函数 ──
-  private generateThreadId(): string {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-      const r = Math.random() * 16 | 0;
-      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-    });
-  }
-
-  // ── 发起新问题 ──
-  async ask(question: string, useContext: boolean = false): Promise<void> {
-    this.currentThreadId = this.generateThreadId();
-    this.state = 'loading';
-
-    const body: Record<string, unknown> = {
-      thread_id: this.currentThreadId,
-      question: question,
-      top_k_themes: 3,
-      top_k_templates: 5,
-    };
-
-    // 追问时携带上一轮 context
-    if (useContext && this.lastSession) {
-      body.context = {
-        previous_question: this.lastSession.question,
-        previous_normalized_question: this.lastSession.normalizedQuestion,
-        previous_filter_indicators: this.lastSession.filterIndicators,
-        previous_dimensions: this.lastSession.dimensions,
-      };
-    }
-
-    await this.streamRequest('/api/v1/recommend', body);
-  }
-
-  // ── 用户确认后恢复 ──
-  async resume(confirmedDimensions: string[], confirmedQuestion: string): Promise<void> {
-    this.state = 'resuming';
-
-    await this.streamRequest('/api/v1/resume', {
-      thread_id: this.currentThreadId,
-      confirmed_dimensions: confirmedDimensions,
-      confirmed_question: confirmedQuestion,
-    });
-  }
-
-  // ── 通用 SSE 流处理 ──
-  private async streamRequest(url: string, body: Record<string, unknown>): Promise<void> {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      this.state = 'error';
-      this.onError(`HTTP ${response.status}`);
-      return;
-    }
-
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    const TIMEOUT_MS = 120000;
-
-    const timer = setTimeout(() => {
-      reader.cancel();
-      this.state = 'error';
-      this.onError('请求超时，请重试');
-    }, TIMEOUT_MS);
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const event = JSON.parse(line.slice(6));
-              this.handleEvent(event);
-
-              // 收到 final 或 error 后清除计时器
-              if (event.event_type === 'final' || event.event_type === 'error') {
-                clearTimeout(timer);
-              }
-            } catch (e) {
-              console.warn('解析 SSE 数据失败:', line);
-            }
-          }
-        }
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  // ── 事件分发 ──
-  private handleEvent(event: Record<string, unknown>): void {
-    switch (event.event_type) {
-      case 'stage_complete': {
-        const stageEvent = event as {
-          stage: string;
-          markdown: string | null;
-        };
-        this.onStageComplete(stageEvent.stage, stageEvent.markdown);
-        break;
-      }
-
-      case 'progress': {
-        const progressEvent = event as {
-          markdown: string;
-          raw: Record<string, unknown>;
-        };
-        this.onProgress(progressEvent.markdown, progressEvent.raw);
-        break;
-      }
-
-      case 'interrupt': {
-        const interruptEvent = event as {
-          event_type: string;
-          status: string;
-          pending_confirmation: Record<string, unknown>;
-        };
-        if (interruptEvent.status === 'low_confidence') {
-          // 低置信度：引导用户修改问题
-          this.state = 'low_confidence';
-          this.onLowConfidence(interruptEvent.pending_confirmation);
-        } else {
-          // 正常确认：展示维度确认界面
-          this.state = 'waiting_confirmation';
-          this.onInterrupt(interruptEvent.pending_confirmation);
-        }
-        break;
-      }
-
-      case 'final': {
-        const finalEvent = event as {
-          data: {
-            normalized_question: string;
-            filter_indicators: Array<{ alias: string; value: string }>;
-            analysis_dimensions: Array<{ search_term: string }>;
-          };
-        };
-        this.state = 'completed';
-        // 保存本轮会话摘要，供下次追问使用
-        // 注意：原始问题 this.question 在发起请求时已缓存，final 中不再返回
-        this.lastSession = {
-          normalizedQuestion: finalEvent.data.normalized_question,
-          filterIndicators: finalEvent.data.filter_indicators.map(f => ({
-            alias: f.alias,
-            value: f.value,
-          })),
-          dimensions: finalEvent.data.analysis_dimensions.map(d => d.search_term),
-        };
-        this.onFinal(finalEvent.data);
-        break;
-      }
-
-      case 'error':
-        this.state = 'error';
-        this.onError((event as { message: string }).message);
-        break;
-    }
-  }
-
-  // ── 以下方法由业务层实现 ──
-  onStageComplete(stage: string, markdown: string | null): void {
-    // 更新进度条；markdown 非 null 时可渲染进度文字
-    console.log(`阶段完成: ${stage}`);
-    if (markdown) {
-      console.log(`  → ${markdown}`);
-    }
-  }
-
-  onProgress(markdown: string, raw: Record<string, unknown>): void {
-    // 直接渲染 markdown 进度文字，或使用 raw 数据自定义进度条
-    console.log(markdown);
-  }
-
-  onInterrupt(pending: Record<string, unknown>): void {
-    // 展示确认界面
-    console.log('需要确认:', pending);
-  }
-
-  onLowConfidence(data: Record<string, unknown>): void {
-    // 展示换词建议
-    console.log('低置信度:', data);
-  }
-
-  onFinal(result: Record<string, unknown>): void {
-    // 展示推荐结果
-    console.log('最终结果:', result);
-  }
-
-  onError(message: string): void {
-    // 展示错误
-    console.error('错误:', message);
-  }
-}
-
-// ── 使用示例 ──
-const client = new RecommendClient();
-
-// 覆写回调
-client.onInterrupt = (pending) => {
-  showConfirmationModal({
-    filterDisplay: (pending as { filter_display: unknown[] }).filter_display,
-    dimensionOptions: (pending as { dimension_options: unknown[] }).dimension_options,
-    normalizedQuestion: (pending as { normalized_question: string }).normalized_question,
-    onConfirm: (selectedDimensions: string[], question: string) => {
-      client.resume(selectedDimensions, question);
-    }
-  });
-};
-
-client.onFinal = (result) => {
-  renderRecommendResult(result);
-};
-
-// 第一个问题
-client.ask('分析南京分行小微企业贷款不良率');
-
-// 用户追问（携带上下文）
-client.ask('那对公贷款呢？', true);
-```
-
-### thread_id 生命周期速查
 
 ```
 用户提交新问题

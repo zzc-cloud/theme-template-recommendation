@@ -32,17 +32,38 @@
 |------|------|------|
 | `search_indicators_by_vector` | **向量化语义搜索魔数师指标** | 0 |
 
-### theme-ontology（Neo4j - 9 个工具）
+### theme-ontology（Neo4j - 12 个工具）
+
+#### 层级导航工具（阶段 1.2）
 
 | 工具 | 功能 | 阶段 |
 |------|------|------|
-| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序，含完整路径） | 1 |
+| `get_sectors_from_root` | 获取"自主分析"下的所有板块（SECTOR） | 1.2 |
+| `get_children_of_node` | 获取任意节点的直接子节点（支持类型过滤） | 1.2 |
+| `get_path_to_theme` | 获取从根节点到主题的完整路径（含同级主题） | 1.2 |
+
+#### 主题聚合与指标补全工具（阶段 1.1/1.3）
+
+| 工具 | 功能 | 阶段 |
+|------|------|------|
+| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序，含完整路径） | 1.1 |
+| `batch_get_indicator_themes` | 批量获取指标的主题归属（用于 Jaccard 勾选引导） | 0.4 |
+| `get_theme_filter_indicators` | 获取主题下全量筛选指标（时间+机构） | 1.3 |
+| `get_theme_analysis_indicators` | 获取主题下全量分析指标 | 1.3 |
 | `get_theme_full_path` | 获取主题从"自主分析"到该主题的完整路径 | 1 |
-| `get_theme_filter_indicators` | 获取主题下全量筛选指标（时间+机构） | 1 |
-| `get_theme_analysis_indicators` | 获取主题下全量分析指标 | 1 |
-| `get_indicator_field_mapping` | 【语义增强】指标字段映射 | 1 |
-| `get_table_terms` | 【语义增强】表字段术语描述 | 1 |
+
+#### 语义增强工具（阶段 1）
+
+| 工具 | 功能 | 阶段 |
+|------|------|------|
+| `get_indicator_field_mapping` | 指标字段映射 | 1 |
+| `get_table_terms` | 表字段术语描述 | 1 |
 | `get_indicator_full_path` | 指标完整路径（含 THEME） | 1 |
+
+#### 模板推荐工具（阶段 2）
+
+| 工具 | 功能 | 阶段 |
+|------|------|------|
 | `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 2 |
 | `get_template_indicators` | 模板包含的指标 | 2 |
 
