@@ -352,12 +352,15 @@ Content-Type: application/json
   "has_conflict": true,
   "can_select_all": false,
   "recommended_first": ["小微企业不良贷款率"],
-  "conflict_analysis": "「小微企业不良贷款率」命中10个小微考核及不良统计主题，「贷款五级分类」命中19个信用卡/对公/个人信贷主题。Jaccard=0.00（<0.5），主题几乎无交集，存在严重主题交叉干扰",
-  "selection_advice": "建议优先勾选「小微企业不良贷款率」，确认推荐结果满意后再考虑补充其他维度",
+  "conflict_analysis": "「小微企业不良贷款率」命中10个小微考核及不良统计主题，「贷款五级分类」命中19个信用卡/对公/个人信贷主题。加权Jaccard=0.00（<0.5），主题几乎无交集，存在严重主题交叉干扰",
+  "selection_advice": "维度间主题无交集（加权 Jaccard < 0.5），同时勾选会导致主题交叉干扰。建议优先勾选核心维度：小微企业不良贷款率。",
   "dimension_analysis": [
     {
       "dimension": "小微企业不良贷款率",
-      "matched_themes": ["科创板块小微业务考核员工统计主题", "不良生成贷款统计日报_多维度主题"],
+      "matched_themes": [
+        {"theme": "科创板块小微业务考核员工统计主题", "weight": 1.85},
+        {"theme": "不良生成贷款统计日报_多维度主题", "weight": 1.62}
+      ],
       "theme_count": 10,
       "independence_score": 0.9,
       "core_concept_score": 0.95,
@@ -365,7 +368,11 @@ Content-Type: application/json
     },
     {
       "dimension": "贷款五级分类",
-      "matched_themes": ["信用卡账户", "外呼营销业务效果（账户）", "对公贷款借据还款计划主题"],
+      "matched_themes": [
+        {"theme": "信用卡账户", "weight": 2.10},
+        {"theme": "外呼营销业务效果（账户）", "weight": 1.45},
+        {"theme": "对公贷款借据还款计划主题", "weight": 1.20}
+      ],
       "theme_count": 19,
       "independence_score": 0.3,
       "core_concept_score": 0.7,
@@ -379,14 +386,16 @@ Content-Type: application/json
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `has_conflict` | bool | 是否存在主题交叉冲突（基于 Jaccard < 阈值判定，默认 0.5） |
-| `can_select_all` | bool | 所有维度是否可以全部勾选（Jaccard 均 >= 阈值） |
-| `recommended_first` | array\<string\> | 建议优先勾选的核心维度（按优先级排序），取 `dimension_analysis` 中 `recommendation="优先"` 的维度 |
-| `conflict_analysis` | string | 维度间主题冲突的专业分析（可展示给高级用户参考），应包含 Jaccard 数值 |
-| `selection_advice` | string | 面向用户的简洁勾选建议（1-2句话，直接展示在界面上） |
+| `has_conflict` | bool | 是否存在主题交叉冲突（**程序化计算**：与 can_select_all 互为反面，即 has_conflict = not can_select_all） |
+| `can_select_all` | bool | 所有维度是否可以全部勾选（**程序化计算**：所有两两维度加权 Jaccard 均 >= 阈值） |
+| `recommended_first` | array\<string\> | 建议优先勾选的核心维度（由 LLM 生成，取 `dimension_analysis` 中 `recommendation="优先"` 的维度） |
+| `conflict_analysis` | string | 维度间主题冲突的专业分析（由 LLM 生成，可展示给高级用户参考），应包含加权 Jaccard 数值 |
+| `selection_advice` | string | 面向用户的简洁勾选建议（**程序化计算**：与 can_select_all 严格对应，can_select_all=true 时建议全部勾选，否则提示存在冲突） |
 | `dimension_analysis` | array | 各维度的详细分析 |
 | `dimension_analysis[].dimension` | string | 分析维度名称（search_term） |
-| `dimension_analysis[].matched_themes` | array\<string\> | 该维度命中 Neo4j 的真实主题别名列表 |
+| `dimension_analysis[].matched_themes` | array\<object\> | 该维度命中 Neo4j 的真实主题列表（含别名和贡献权重），按权重降序排列 |
+| `dimension_analysis[].matched_themes[].theme` | string | 主题别名 |
+| `dimension_analysis[].matched_themes[].weight` | float | 该主题对该维度的贡献权重（= 映射到该 theme 的指标相似度之和），用于加权 Jaccard 计算 |
 | `dimension_analysis[].theme_count` | int | 命中主题的总数量 |
 | `dimension_analysis[].independence_score` | float | 独立性得分 0.0~1.0，越高表示越独立（与其他维度越不重叠） |
 | `dimension_analysis[].core_concept_score` | float | 核心概念得分 0.0~1.0，越高表示越能代表用户的核心分析意图 |
@@ -401,7 +410,7 @@ Content-Type: application/json
   - `conflict_analysis` 可折叠展示（面向高级用户）
 - 单维度场景下 `dimension_guidance` 不会出现（无需引导）
 
-> **实现说明**：`dimension_guidance` 由服务端 LLM 自动生成，生成失败时不阻塞流程（返回 null）。前端应做好 `dimension_guidance` 字段可能不存在的容错处理。
+> **实现说明**：`dimension_guidance` 中 `has_conflict`、`can_select_all`、`selection_advice` 由**程序化计算**得出（确保三字段严格一致），`recommended_first`、`conflict_analysis`、`dimension_analysis` 由 LLM 生成。LLM 生成失败时不阻塞流程（返回 null）。前端应做好 `dimension_guidance` 字段可能不存在的容错处理。
 
 ### 5.4 interrupt（低置信度类型）
 
@@ -525,6 +534,7 @@ Content-Type: application/json
         "theme_id": "THEME.xxx",
         "theme_alias": "小微企业贷款",
         "theme_level": 4,
+        "theme_path": "自主分析 > 资产板块 > 小微贷款 > 小微企业贷款",
         "is_supported": true,
         "support_reason": "主题业务领域与用户需求高度匹配，包含完整的贷款风险分析指标",
         "selected_filter_indicators": [
@@ -545,22 +555,81 @@ Content-Type: application/json
         ]
       }
     ],
+    "candidate_themes_from_aggregate": [
+      {
+        "theme_id": "THEME.xxx",
+        "theme_alias": "小微企业贷款",
+        "theme_level": 4,
+        "theme_path": "自主分析 > 资产板块 > 小微贷款 > 小微企业贷款",
+        "frequency": 12,
+        "weighted_frequency": 8.5,
+        "matched_indicator_ids": ["INDICATOR.aaa", "INDICATOR.bbb"]
+      }
+    ],
+    "navigation_path_detail": [
+      {
+        "sector_id": "SECTOR.xxx",
+        "sector_alias": "资产板块",
+        "sector_path": "自主分析 > 资产板块",
+        "total_themes": 52,
+        "selected_themes": [
+          {
+            "theme_id": "THEME.xxx",
+            "theme_alias": "小微企业贷款",
+            "theme_path": "自主分析 > 资产板块 > 小微贷款 > 小微企业贷款"
+          }
+        ]
+      }
+    ],
     "recommended_templates": [
       {
         "template_id": "TEMPLATE.INSIGHT.I0b2bcd1ade17b002",
         "template_alias": "小微企业贷款风险监控表",
         "template_description": "监控小微企业贷款的风险指标，包含不良率、逾期率等核心指标",
+        "theme_id": "THEME.xxx",
         "theme_alias": "小微企业贷款",
         "usage_count": 256,
         "coverage_ratio": 1.0,
-        "has_qualified_templates": true,
-        "fallback_reason": "",
+        "coverage_detail": {
+          "covered_indicator_aliases": ["不良贷款率", "逾期率", "关注类贷款占比"],
+          "missing_indicator_aliases": [],
+          "matched_count": 3,
+          "total_user_indicators": 3
+        },
+        "theme_has_qualified_templates": true,
+        "theme_fallback_reason": "",
         "usability": {
           "template_id": "TEMPLATE.INSIGHT.I0b2bcd1ade17b002",
-          "overall_usability": "可直接使用",
-          "usability_summary": "模板完整覆盖用户所需的所有分析指标，可直接使用",
-          "missing_indicator_analysis": []
+          "is_supported": true,
+          "support_reason": "模板完整覆盖用户所需的所有分析指标，可直接使用"
         }
+      }
+    ],
+    "template_search_detail": [
+      {
+        "theme_id": "THEME.xxx",
+        "theme_alias": "小微企业贷款",
+        "theme_path": "自主分析 > 资产板块 > 小微贷款 > 小微企业贷款",
+        "is_supported": true,
+        "matched_indicator_aliases": ["不良贷款率", "逾期率", "关注类贷款占比"],
+        "has_qualified_templates": true,
+        "fallback_reason": "",
+        "all_template_count": 5,
+        "templates": [
+          {
+            "template_id": "TEMPLATE.INSIGHT.I0b2bcd1ade17b002",
+            "template_alias": "小微企业贷款风险监控表",
+            "template_description": "监控小微企业贷款的风险指标",
+            "usage_count": 256,
+            "coverage_ratio": 1.0,
+            "covered_indicator_aliases": ["不良贷款率", "逾期率", "关注类贷款占比"],
+            "missing_indicator_aliases": [],
+            "matched_count": 3,
+            "total_user_indicators": 3,
+            "is_supported": true,
+            "usability_reason": "模板完整覆盖用户所需的所有分析指标，可直接使用"
+          }
+        ]
       }
     ],
     "markdown": ""
@@ -575,11 +644,19 @@ Content-Type: application/json
 
 | 字段路径 | 说明 |
 |----------|------|
-| `analysis_dimensions[].indicators` | 包含全量搜索结果（最多 VECTOR_SEARCH_TOP_K = 20 条）。追问时，前端只需取 `analysis_dimensions[].search_term` 构造 `context.previous_dimensions`，无需传递 indicators 数据。 |
+| `analysis_dimensions[].indicators` | 包含全量搜索结果（最多 VECTOR_SEARCH_TOP_K = 50 条）。追问时，前端只需取 `analysis_dimensions[].search_term` 构造 `context.previous_dimensions`，无需传递 indicators 数据。 |
+| `recommended_themes[].theme_path` | 主题在层级中的完整路径，如"自主分析 > 资产板块 > 小微贷款 > 小微企业贷款" |
 | `recommended_themes[].is_supported` | true 为推荐主题，false 为不推荐（仍会返回，需标注） |
+| `candidate_themes_from_aggregate` | 聚合路径候选主题列表，含 frequency、weighted_frequency、matched_indicator_ids |
+| `navigation_path_detail` | 层级导航路径详情，每个板块含 selected_themes（筛选出的主题） |
 | `recommended_templates[].coverage_ratio` | 覆盖率 0.0~1.0，建议展示为百分比 |
-| `recommended_templates[].has_qualified_templates` | false 表示为降级推荐，需在界面上标注 |
-| `recommended_templates[].usability.overall_usability` | 可直接使用 / 补充后可用 / 缺口较大建议谨慎 |
+| `recommended_templates[].coverage_detail` | 覆盖率详情，含 covered_indicator_aliases（已覆盖指标）、missing_indicator_aliases（缺失指标）、matched_count、total_user_indicators |
+| `recommended_templates[].theme_has_qualified_templates` | 该模板所属主题是否有达标模板（覆盖率>=阈值）。false 表示为降级推荐，需在界面上标注 |
+| `recommended_templates[].theme_fallback_reason` | 降级原因（仅当 theme_has_qualified_templates=false 时有值） |
+| `recommended_templates[].usability.is_supported` | LLM 判定该模板是否可用（true=推荐使用，false=不推荐） |
+| `recommended_templates[].usability.support_reason` | LLM 给出的可用性判定理由 |
+| `template_search_detail` | 每个主题的模板检索汇总，含 has_qualified_templates、fallback_reason、all_template_count、matched_indicator_aliases，以及 `templates` 子列表（该主题下所有被 LLM 评估过的模板详情） |
+| `template_search_detail[].templates` | 该主题下被 LLM 评估过的模板列表，每项含 coverage_ratio、covered/missing_indicator_aliases、is_supported、usability_reason |
 | `markdown` | **永远为空字符串**。自然语言总结通过 `summary` 事件推送 |
 
 ### 5.6 summary — 自然语言总结（在 final 之后推送）
@@ -1097,13 +1174,22 @@ curl http://localhost:8000/health
 
 ---
 
-## 附录：模板可用性等级说明
+## 附录：模板可用性说明
 
-| 可用性等级 | 含义 | 展示标记 |
-|-----------|------|---------|
-| 可直接使用 | 缺失指标均为辅助或可忽略级别，不影响核心分析 | ✅ |
-| 补充后可用 | 缺失部分辅助指标，在模板基础上补充后可满足需求 | 🔧 |
-| 缺口较大建议谨慎 | 缺失核心指标，需较多调整才能满足需求 | ⚠️ |
+模板可用性由 `usability.is_supported`（bool）和 `usability.support_reason`（string）两个字段共同描述，由 LLM 根据模板指标覆盖情况和用户需求判定。
+
+| `is_supported` | 含义 | 展示标记 |
+|----------------|------|---------|
+| `true` | 模板指标覆盖满足用户需求，推荐使用 | ✅ |
+| `false` | 模板指标缺口较大或不匹配用户需求，不推荐 | ⚠️ |
+
+`support_reason` 字段提供判定理由的自然语言描述，前端可展示给用户参考。
+
+覆盖率详情可通过 `coverage_detail` 字段获取：
+- `covered_indicator_aliases`：模板已覆盖的用户指标别名列表
+- `missing_indicator_aliases`：模板缺失的用户指标别名列表
+- `matched_count`：已覆盖指标数量
+- `total_user_indicators`：用户所需指标总数
 
 ---
 
@@ -1150,5 +1236,6 @@ GET /health/memory
 
 ## 附录：覆盖率说明
 
-- **达标模板**：覆盖率 >= 80% 的模板，可直接推荐
-- **降级推荐**：无达标模板时，返回覆盖率最高和热度最高的模板（最多 2 个），需在界面上标注"参考推荐"
+- **达标模板**：覆盖率 >= 阈值（默认 20%，可通过 `TEMPLATE_COVERAGE_THRESHOLD` 配置）的模板，属于达标推荐
+- **非达标模板**：覆盖率低于阈值的模板仍会返回，但前端应根据 `theme_has_qualified_templates` 和 `usability.is_supported` 判断展示方式
+- **覆盖率详情**：每个模板的 `coverage_detail` 字段提供精确的覆盖/缺失指标明细，前端可据此展示具体差距
