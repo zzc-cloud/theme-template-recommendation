@@ -29,7 +29,7 @@ from .models import (
     TemplateUsability,
     DimensionSelectionGuidance,
     HierarchyNavigationResult,
-    ConvergenceCheckResult,
+    SectorFilterResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +118,21 @@ def _try_parse_json_with_fix(raw_str: str, model: Type[BaseModel]) -> Optional[B
         logger.debug(f"[JSON解析] 修复后解析仍失败: {e}")
 
     return None
+
+
+def _log_parsed_result(model_name: str, parsed: BaseModel) -> None:
+    """
+    解析成功后记录结构化日志，便于诊断
+
+    针对关键模型输出关键字段的摘要信息
+    """
+    if model_name == "HierarchyNavigationResult":
+        count = len(parsed.selected_themes)
+        if count == 0:
+            logger.warning(f"[层级导航LLM返回] selected_themes=0，请检查 Prompt 或 LLM 判断逻辑")
+        else:
+            theme_names = [t.theme_alias for t in parsed.selected_themes[:3]]
+            logger.info(f"[层级导航LLM返回] selected_themes={count}，前3个: {theme_names}")
 
 
 # ─────────────────────────────────────────────
@@ -233,7 +248,9 @@ def _invoke_with_timeout(
 
         # 如果解析成功，直接返回
         if result.get("parsed") is not None:
-            return result["parsed"]
+            parsed = result["parsed"]
+            _log_parsed_result(model.__name__, parsed)
+            return parsed
 
         # 如果解析失败但有原始响应，尝试修复 JSON
         raw = result.get("raw")
@@ -246,14 +263,23 @@ def _invoke_with_timeout(
             parsed = _try_parse_json_with_fix(raw_content, model)
             if parsed is not None:
                 logger.info(f"[JSON修复成功] {model.__name__}")
+                _log_parsed_result(model.__name__, parsed)
                 return parsed
 
-        # 如果修复也失败，抛出原始错误
+        # 如果修复也失败，记录原始响应并抛出错误
         if parsing_error:
+            raw_content = raw.content if hasattr(raw, 'content') else str(raw)
+            logger.error(
+                f"[JSON解析+修复均失败] {model.__name__}，"
+                f"原始响应({len(raw_content)}字符): {raw_content[:500]}"
+            )
             raise parsing_error
 
         # 兜底：返回解析结果（可能是 None）
-        return result.get("parsed")
+        parsed = result.get("parsed")
+        if parsed is not None:
+            _log_parsed_result(model.__name__, parsed)
+        return parsed
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_do_invoke)
@@ -613,19 +639,19 @@ def analyze_template_usability(
     return invoke_structured(TemplateUsability, system_prompt, user_prompt)
 
 
-def check_convergence(
-    original_concept: str,
-    search_results_str: str,
-) -> ConvergenceCheckResult:
-    """阶段 0.3：反向语义验证（两步收敛验证的第2步）"""
+def filter_sectors_by_question(
+    user_question: str,
+    sector_list_str: str,
+) -> SectorFilterResult:
+    """板块筛选 - 根据用户问题筛选相关板块"""
     from . import prompts as llm_prompts
 
-    system_prompt = "你是一个专业的银行数据分析专家，擅长验证搜索结果是否真正回应了原始概念。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
-    user_prompt = llm_prompts.CONVERGENCE_CHECK_PROMPT.format(
-        original_concept=original_concept,
-        search_results_str=search_results_str,
+    system_prompt = "你是一个专业的银行数据分析专家，擅长判断板块与用户需求的关联性。重要：直接输出 JSON，不要使用任何 markdown 代码块（如 ```json）包裹。"
+    user_prompt = llm_prompts.SECTOR_FILTER_PROMPT.format(
+        user_question=user_question,
+        sector_list_str=sector_list_str,
     )
-    return invoke_structured(ConvergenceCheckResult, system_prompt, user_prompt)
+    return invoke_structured(SectorFilterResult, system_prompt, user_prompt)
 
 
 def filter_themes_by_hierarchy(

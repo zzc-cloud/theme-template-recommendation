@@ -71,6 +71,15 @@ class NavigationPathTheme(TypedDict):
     sector_alias: str
 
 
+class SectorThemeInfo(TypedDict):
+    """板块及在该板块下筛选到的主题"""
+    sector_id: str
+    sector_alias: str
+    sector_path: str
+    total_themes: int       # 该板块下全量主题数
+    selected_themes: list[NavigationPathTheme]  # LLM 筛选出的候选主题
+
+
 class RecommendedTheme(TypedDict):
     """推荐主题（含裁决结果）"""
     theme_id: str
@@ -87,10 +96,8 @@ class RecommendedTheme(TypedDict):
 class TemplateUsability(TypedDict):
     """模板可用性分析结果"""
     template_id: str
-    template_alias: str
-    overall_usability: str
-    usability_summary: str
-    missing_indicator_analysis: list
+    is_supported: bool
+    support_reason: str
 
 
 class RecommendedTemplate(TypedDict):
@@ -170,12 +177,14 @@ class AgentState(TypedDict):
 
     # ── 阶段 1 产物 ──
     candidate_themes: list[ThemeCandidate]     # 候选主题
-    navigation_path_themes: list[NavigationPathTheme]  # 新增：层级导航候选主题
+    navigation_path_themes: list[NavigationPathTheme]  # 层级导航候选主题（汇总）
+    navigation_path_detail: list[SectorThemeInfo]      # 新增：每个板块的导航详情
     recommended_themes: list[RecommendedTheme] # 推荐主题（含裁决）
     convergence_rate: float                  # 新增：收敛率 = 已收敛概念数 / 原始概念总数
 
     # ── 阶段 2 产物 ──
     recommended_templates: list[RecommendedTemplate]  # 推荐模板
+    template_search_detail: list[dict]  # 每个主题的模板检索详情（含覆盖率）
 
     # ── 元数据 ──
     top_k_themes: int                         # 请求的 top_k_themes

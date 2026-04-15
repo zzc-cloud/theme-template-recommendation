@@ -65,10 +65,10 @@ EMBEDDING_MODEL: str = os.getenv(
 )
 EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "4096"))
 
-# LLM 模型（用于推理，SiliconFlow）
+# LLM 模型（用于推理，SiliconFlow）"Pro/zai-org/GLM-4.7"
 LLM_MODEL: str = os.getenv(
     "LLM_MODEL",
-    "Pro/zai-org/GLM-4.7",
+    "Pro/deepseek-ai/DeepSeek-R1",
 )
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
@@ -106,8 +106,14 @@ LOW_CONFIDENCE_THRESHOLD: float = CONVERGENCE_SIMILARITY_THRESHOLD
 DEFAULT_TOP_K_THEMES: int = int(os.getenv("DEFAULT_TOP_K_THEMES", "3"))
 DEFAULT_TOP_K_TEMPLATES: int = int(os.getenv("DEFAULT_TOP_K_TEMPLATES", "5"))
 
+# 主题加权频次阈值：加权频次 >= 此值的 THEME 作为候选主题（动态选择，不再固定数量）
+THEME_WEIGHTED_FREQUENCY_THRESHOLD: float = float(os.getenv("THEME_WEIGHTED_FREQUENCY_THRESHOLD", "0.6"))
+
+# 模板覆盖率阈值：覆盖率 >= 此值的模板作为达标模板（不再降级推荐）
+TEMPLATE_COVERAGE_THRESHOLD: float = float(os.getenv("TEMPLATE_COVERAGE_THRESHOLD", "0.2"))
+
 # 向量搜索 top_k
-VECTOR_SEARCH_TOP_K: int = int(os.getenv("VECTOR_SEARCH_TOP_K", "20"))
+VECTOR_SEARCH_TOP_K: int = int(os.getenv("VECTOR_SEARCH_TOP_K", "50"))
 
 # Jaccard 相似度阈值：维度两两之间的 Jaccard 均 >= 此值时，提示用户可以全部勾选
 JACCARD_SIMILARITY_THRESHOLD: float = float(os.getenv("JACCARD_SIMILARITY_THRESHOLD", "0.5"))
@@ -152,3 +158,16 @@ LLM_MAX_DELAY_SERVER_ERROR: float = float(os.getenv("LLM_MAX_DELAY_SERVER_ERROR"
 LLM_MAX_DELAY_SCHEMA_ERROR: float = float(os.getenv("LLM_MAX_DELAY_SCHEMA_ERROR", "2.0"))
 LLM_MAX_DELAY_AUTH_ERROR:   float = float(os.getenv("LLM_MAX_DELAY_AUTH_ERROR",   "0.0"))
 LLM_MAX_DELAY_UNKNOWN:      float = float(os.getenv("LLM_MAX_DELAY_UNKNOWN",      "5.0"))
+
+
+# ─────────────────────────────────────────────
+# 分批执行配置
+# ─────────────────────────────────────────────
+# 主题裁决每批主题数量（避免一次性处理过多主题导致超时）
+JUDGE_THEMES_BATCH_SIZE: int = int(os.getenv("JUDGE_THEMES_BATCH_SIZE", "5"))
+# 主题裁决每批超时时间（秒）
+JUDGE_THEMES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("JUDGE_THEMES_BATCH_TIMEOUT_SECONDS", "120.0"))
+# 模板分析每批模板数量
+ANALYZE_TEMPLATES_BATCH_SIZE: int = int(os.getenv("ANALYZE_TEMPLATES_BATCH_SIZE", "5"))
+# 模板分析每批超时时间（秒）
+ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS", "120.0"))

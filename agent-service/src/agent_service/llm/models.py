@@ -66,19 +66,21 @@ class LowConfidenceResult(BaseModel):
 class DimensionAnalysisItem(BaseModel):
     """维度分析条目"""
     dimension: str = Field(description="分析维度名称")
-    primary_theme: str = Field(description="该维度主要命中的主题")
+    primary_theme: str = Field(description="该维度主要命中的主题（来自 Neo4j 权重最高的 theme）")
     independence_score: float = Field(description="独立性得分 0.0-1.0，越高越独立")
     core_concept_score: float = Field(description="核心概念得分 0.0-1.0，越高越代表用户核心意图")
     recommendation: str = Field(description="建议：优先/可选/建议后选")
 
 
 class DimensionSelectionGuidance(BaseModel):
-    """阶段 0.4：分析维度勾选引导结果"""
-    has_conflict: bool = Field(description="是否存在主题交叉冲突")
-    can_select_all: bool = Field(description="所有维度是否可以全部勾选（Jaccard 均 >= 阈值）")
+    """阶段 0.4：分析维度勾选引导结果
+
+    注意：has_conflict、can_select_all、selection_advice 由程序化计算（不在此模型中），
+    matched_themes 和 theme_count 也由程序化填充。
+    此模型仅包含 LLM 需要生成的字段。
+    """
     recommended_first: list[str] = Field(description="建议优先勾选的核心维度列表")
-    conflict_analysis: str = Field(description="维度间主题冲突分析")
-    selection_advice: str = Field(description="面向用户的勾选建议（1-2句话）")
+    conflict_analysis: str = Field(description="维度间主题冲突分析（含加权 Jaccard 数值）")
     dimension_analysis: list[DimensionAnalysisItem] = Field(
         default_factory=list,
         description="各维度的详细分析"
@@ -121,25 +123,11 @@ class ThemeJudgment(BaseModel):
 # 阶段 2：模板推荐
 # ═══════════════════════════════════════════════════════════════════════
 
-class MissingIndicatorAnalysis(BaseModel):
-    """缺失指标分析"""
-    indicator_alias: str = Field(description="缺失指标别名")
-    importance: str = Field(description="重要程度：核心/辅助/可忽略")
-    impact: str = Field(description="缺失影响")
-    supplement_suggestion: str = Field(description="补充建议")
-
-
 class TemplateUsability(BaseModel):
     """阶段 2.2：模板可用性分析"""
     template_id: str = Field(description="模板ID")
-    overall_usability: str = Field(
-        description="整体可用性：可直接使用/补充后可用/缺口较大建议谨慎"
-    )
-    usability_summary: str = Field(description="可用性一句话说明")
-    missing_indicator_analysis: list[MissingIndicatorAnalysis] = Field(
-        default_factory=list,
-        description="缺失指标分析列表"
-    )
+    is_supported: bool = Field(description="模板是否支撑用户需求")
+    support_reason: str = Field(description="判断理由")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -162,12 +150,17 @@ class HierarchyNavigationResult(BaseModel):
     )
 
 
-class ConvergenceCheckResult(BaseModel):
-    """反向语义验证结果"""
-    is_valid_convergence: bool = Field(
-        description="搜索结果是否真正回应了原始概念"
-    )
-    reason: str = Field(
-        default="",
-        description="验证理由"
+class SectorSelection(BaseModel):
+    """板块选择"""
+    sector_id: str = Field(description="板块ID")
+    sector_alias: str = Field(description="板块名称")
+    sector_path: str = Field(description="板块路径")
+    reason: str = Field(default="", description="选择理由")
+
+
+class SectorFilterResult(BaseModel):
+    """板块筛选结果"""
+    selected_sectors: list[SectorSelection] = Field(
+        default_factory=list,
+        description="选中的板块列表"
     )

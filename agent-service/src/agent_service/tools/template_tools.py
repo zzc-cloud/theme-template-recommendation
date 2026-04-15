@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Any
 
+from .. import config
 from .theme_tools import get_neo4j_driver
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ def get_theme_templates_with_coverage(
         matched_indicator_aliases = matched_indicator_aliases[:100] if matched_indicator_aliases else []
         top_k = min(max(1, top_k), 50)
 
+        logger.info(f"[get_theme_templates_with_coverage] >>> 输入: theme_id={theme_id}, alias_count={len(matched_indicator_aliases)}, top_k={top_k}")
+        logger.info(f"[get_theme_templates_with_coverage]    matched_indicator_aliases={matched_indicator_aliases}")
+
         with get_neo4j_driver().session() as session:
             # 构建模板类型过滤条件
             type_filter = ""
@@ -53,6 +57,8 @@ def get_theme_templates_with_coverage(
 
             user_indicator_set = set(matched_indicator_aliases)
             user_indicator_count = len(user_indicator_set)
+            type_filter_str = type_filter or "全部"
+            logger.info(f"[get_theme_templates_with_coverage]    user_indicator_set size={user_indicator_count}, type_filter='{type_filter_str}'")
 
             # 查询主题下的模板及其包含的所有指标（只取 heat > 0 的模板）
             cypher = f"""
@@ -67,6 +73,7 @@ def get_theme_templates_with_coverage(
             ORDER BY t.heat DESC
             LIMIT $top_k
             """
+            logger.info(f"[get_theme_templates_with_coverage]    执行 Cypher: theme_id={theme_id}, top_k={top_k}")
 
             result = session.run(
                 cypher, theme_id=theme_id, top_k=top_k
@@ -91,6 +98,11 @@ def get_theme_templates_with_coverage(
                 # 缺失指标别名 = 用户指标别名 - 模板指标别名交集
                 missing_aliases = list(user_indicator_set - template_indicator_aliases)
 
+                logger.info(f"[get_theme_templates_with_coverage]    模板={row['template_alias']}({row['template_id']}), "
+                            f"heat={row['usage_count']}, 模板指标数={len(template_indicator_aliases)}, "
+                            f"匹配数={matched_count}/{user_indicator_count}, 覆盖率={coverage_ratio:.3f}, "
+                            f"covered={covered_aliases}, missing={missing_aliases}")
+
                 all_templates.append({
                     "template_id": row["template_id"],
                     "template_alias": row["template_alias"],
@@ -110,10 +122,15 @@ def get_theme_templates_with_coverage(
                     ],
                 })
 
-            # 过滤出覆盖率 >= 80% 的达标模板
+            logger.info(f"[get_theme_templates_with_coverage]    查询到模板数={len(all_templates)}")
+
+            # 过滤出覆盖率 >= 阈值的达标模板
+            threshold = config.TEMPLATE_COVERAGE_THRESHOLD
+            logger.info(f"[get_theme_templates_with_coverage]    覆盖率阈值={threshold}({threshold*100:.0f}%)")
             qualified_templates = [
-                t for t in all_templates if t["coverage_ratio"] >= 0.8
+                t for t in all_templates if t["coverage_ratio"] >= threshold
             ]
+            logger.info(f"[get_theme_templates_with_coverage]    达标模板数={len(qualified_templates)}/{len(all_templates)}")
 
             if qualified_templates:
                 qualified_templates.sort(
@@ -126,61 +143,32 @@ def get_theme_templates_with_coverage(
                     "has_qualified_templates": True,
                     "matched_templates": qualified_templates,
                     "matched_template_count": len(qualified_templates),
+                    # 所有扫描过的模板（含覆盖率详情）
+                    "all_templates": all_templates,
+                    "all_template_count": len(all_templates),
+                    "fallback_reason": "",
                     "execution_time_ms": round((time.time() - start) * 1000, 2),
                 }
             else:
                 if not all_templates:
-                    return {
-                        "success": True,
-                        "theme_id": theme_id,
-                        "template_type": template_type,
-                        "has_qualified_templates": False,
-                        "matched_templates": [],
-                        "matched_template_count": 0,
-                        "fallback_reason": "该主题下无热度大于 0 的模板",
-                        "execution_time_ms": round((time.time() - start) * 1000, 2),
-                    }
-
-                # 降级推荐：覆盖率最高 + 热度最高
-                sorted_by_coverage = sorted(
-                    all_templates, key=lambda x: x["coverage_ratio"], reverse=True
-                )
-                highest_coverage = sorted_by_coverage[0]
-
-                sorted_by_heat = sorted(
-                    all_templates, key=lambda x: x["usage_count"], reverse=True
-                )
-                highest_heat = sorted_by_heat[0]
-
-                fallback_templates = [highest_coverage]
-                if highest_heat["template_id"] != highest_coverage["template_id"]:
-                    fallback_templates.append(highest_heat)
-
-                # 根据实际推荐数量生成准确的 fallback_reason
-                if len(fallback_templates) == 1:
-                    fallback_reason = (
-                        f"无覆盖率 >= 80% 的达标模板，该主题下仅有 1 个可用模板"
-                        f"「{highest_coverage['template_alias']}」"
-                        f"（覆盖率 {highest_coverage['coverage_ratio']*100:.0f}%，"
-                        f"使用 {highest_coverage['usage_count']} 次）"
-                    )
+                    reason = "该主题下无热度大于 0 的模板"
                 else:
-                    fallback_reason = (
-                        f"无覆盖率 >= 80% 的达标模板，降级推荐覆盖率最高"
-                        f"「{highest_coverage['template_alias']}」"
-                        f"（{highest_coverage['coverage_ratio']*100:.0f}%）"
-                        f"和热度最高「{highest_heat['template_alias']}」"
-                        f"（{highest_heat['usage_count']}次使用）的模板"
+                    best = max(all_templates, key=lambda x: x["coverage_ratio"])
+                    reason = (
+                        f"该主题下模板最高覆盖率仅 {best['coverage_ratio']*100:.0f}%，"
+                        f"未达到 {threshold*100:.0f}% 的推荐阈值"
                     )
-
                 return {
                     "success": True,
                     "theme_id": theme_id,
                     "template_type": template_type,
                     "has_qualified_templates": False,
-                    "matched_templates": fallback_templates,
-                    "matched_template_count": len(fallback_templates),
-                    "fallback_reason": fallback_reason,
+                    "matched_templates": [],
+                    "matched_template_count": 0,
+                    # 所有扫描过的模板（含覆盖率详情，用于展示降级推荐）
+                    "all_templates": all_templates,
+                    "all_template_count": len(all_templates),
+                    "fallback_reason": reason,
                     "execution_time_ms": round((time.time() - start) * 1000, 2),
                 }
 

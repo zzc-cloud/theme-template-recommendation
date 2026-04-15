@@ -619,7 +619,7 @@ def get_sectors_from_root() -> dict:
         return {"success": False, "error": str(e)}
 
 
-def get_sector_themes(sector_id: str, top_k: int = 100) -> dict:
+def get_sector_themes(sector_id: str, top_k: int = 500) -> dict:
     """
     获取指定板块下所有层级的 THEME 节点（批量一次查询）
 
@@ -628,7 +628,7 @@ def get_sector_themes(sector_id: str, top_k: int = 100) -> dict:
 
     Args:
         sector_id: SECTOR 节点 ID
-        top_k: 返回主题数量上限，默认 100，最大 500
+        top_k: 返回主题数量上限，默认 500，最大 500
 
     Returns:
         {

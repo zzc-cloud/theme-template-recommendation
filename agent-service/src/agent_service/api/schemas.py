@@ -118,33 +118,105 @@ class RecommendedThemeResponse(BaseModel):
     selected_analysis_indicators: list[SelectedIndicatorResponse] = Field(default_factory=list)
 
 
-class MissingIndicatorAnalysisResponse(BaseModel):
-    """缺失指标分析"""
-    indicator_alias: str
-    importance: str  # 核心 / 辅助 / 可忽略
-    impact: str
-    supplement_suggestion: str
+class NavigationThemeResponse(BaseModel):
+    """层级导航中筛选出的候选主题"""
+    theme_id: str = ""
+    theme_alias: str = ""
+    theme_path: str = ""
+
+
+class SectorNavigationResponse(BaseModel):
+    """板块导航结果"""
+    sector_id: str = ""
+    sector_alias: str = ""
+    sector_path: str = ""
+    total_themes: int = 0
+    selected_themes: list[NavigationThemeResponse] = Field(default_factory=list)
+
+
+class CandidateThemeResponse(BaseModel):
+    """聚合路径候选主题"""
+    theme_id: str = ""
+    theme_alias: str = ""
+    theme_level: int = 0
+    theme_path: str = ""
+    frequency: int = 0
+    weighted_frequency: float = 0.0
+    matched_indicator_ids: list[str] = Field(default_factory=list)
 
 
 class TemplateUsabilityResponse(BaseModel):
     """模板可用性"""
     template_id: str = ""
-    overall_usability: str = ""  # 可直接使用 / 补充后可用 / 缺口较大建议谨慎
-    usability_summary: str = ""
-    missing_indicator_analysis: list[MissingIndicatorAnalysisResponse] = Field(default_factory=list)
+    is_supported: bool = False
+    support_reason: str = ""
+
+
+class TemplateCoverageDetail(BaseModel):
+    """模板覆盖率详情（用于展示每个模板的匹配情况）"""
+    covered_indicator_aliases: list[str] = Field(
+        default_factory=list,
+        description="模板覆盖的用户指标别名列表",
+    )
+    missing_indicator_aliases: list[str] = Field(
+        default_factory=list,
+        description="模板缺失的用户指标别名列表",
+    )
+    matched_count: int = Field(default=0, description="模板覆盖的用户指标数量")
+    total_user_indicators: int = Field(default=0, description="用户所需指标总数")
 
 
 class RecommendedTemplateResponse(BaseModel):
     """推荐模板"""
-    template_id: str
-    template_alias: str
+    template_id: str = ""
+    template_alias: str = ""
     template_description: str = ""
+    theme_id: str = ""
     theme_alias: str = ""
-    usage_count: int
-    coverage_ratio: float  # 0.0 ~ 1.0
-    has_qualified_templates: bool
-    fallback_reason: str = ""
+    usage_count: int = 0
+    coverage_ratio: float = 0.0  # 0.0 ~ 1.0
+    # 覆盖率详情
+    coverage_detail: TemplateCoverageDetail = Field(default_factory=TemplateCoverageDetail)
+    # 该主题是否达标（has_qualified_templates 改为 per-theme 字段）
+    theme_has_qualified_templates: bool = Field(
+        default=False,
+        description="该模板所属主题是否有达标模板（覆盖率>=阈值）",
+    )
+    theme_fallback_reason: str = Field(
+        default="",
+        description="该模板所属主题的降级原因",
+    )
     usability: TemplateUsabilityResponse = Field(default_factory=TemplateUsabilityResponse)
+
+
+class TemplateSearchDetailTemplateItem(BaseModel):
+    """template_search_detail 中每个主题下的模板条目"""
+    template_id: str = ""
+    template_alias: str = ""
+    template_description: str = ""
+    usage_count: int = 0
+    coverage_ratio: float = 0.0
+    covered_indicator_aliases: list[str] = Field(default_factory=list)
+    missing_indicator_aliases: list[str] = Field(default_factory=list)
+    matched_count: int = 0
+    total_user_indicators: int = 0
+    # LLM 评估结果
+    is_supported: bool = False
+    usability_reason: str = ""
+
+
+class TemplateSearchDetailResponse(BaseModel):
+    """主题模板检索详情（每个主题的模板覆盖率汇总）"""
+    theme_id: str = ""
+    theme_alias: str = ""
+    theme_path: str = ""
+    is_supported: bool = False
+    matched_indicator_aliases: list[str] = Field(default_factory=list)
+    has_qualified_templates: bool = False
+    fallback_reason: str = ""
+    all_template_count: int = 0
+    # 该主题下被 LLM 评估过的所有模板
+    templates: list[TemplateSearchDetailTemplateItem] = Field(default_factory=list)
 
 
 class RecommendResponse(BaseModel):
@@ -154,8 +226,26 @@ class RecommendResponse(BaseModel):
     filter_indicators: list[FilterIndicatorResponse] = Field(default_factory=list)
     analysis_dimensions: list[AnalysisDimensionResponse] = Field(default_factory=list)
     is_low_confidence: bool = False
+    # 双路径探查结果
+    candidate_themes_from_aggregate: list[CandidateThemeResponse] = Field(
+        default_factory=list,
+        description="聚合路径候选主题",
+    )
+    navigation_path_detail: list[SectorNavigationResponse] = Field(
+        default_factory=list,
+        description="层级导航路径详情（每个板块及筛选出的主题）",
+    )
+    # 推荐结果
     recommended_themes: list[RecommendedThemeResponse] = Field(default_factory=list)
-    recommended_templates: list[RecommendedTemplateResponse] = Field(default_factory=list)
+    recommended_templates: list[RecommendedTemplateResponse] = Field(
+        default_factory=list,
+        description="检索到的模板列表（含每个模板的覆盖率详情）",
+    )
+    # 主题模板检索详情（每个主题的汇总）
+    template_search_detail: list[TemplateSearchDetailResponse] = Field(
+        default_factory=list,
+        description="每个主题的模板检索汇总，含覆盖率详情",
+    )
     execution_time_ms: float
     iteration_rounds: int = 0
     conversation_round: int = Field(default=1, description="当前对话轮次")

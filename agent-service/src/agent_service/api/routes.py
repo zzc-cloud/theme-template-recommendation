@@ -29,6 +29,12 @@ from .schemas import (
     SyncInterruptInfo,
     SyncResponse,
     TemplateUsabilityResponse,
+    TemplateCoverageDetail,
+    TemplateSearchDetailResponse,
+    TemplateSearchDetailTemplateItem,
+    CandidateThemeResponse,
+    SectorNavigationResponse,
+    NavigationThemeResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,8 +77,10 @@ STAGE_COMPLETE_TEXT = {
     "extract_phrases": None,        # 已由 custom 事件覆盖
     "classify_and_iterate": None,   # 已由 custom 事件覆盖
     "wait_for_confirmation": None,  # interrupt 事件覆盖
-    "aggregate_themes": "│ ✅ **[1.1]** 候选主题聚合完成",
-    "complete_indicators": "│ ✅ **[1.2]** 全量指标补全完成",
+    "aggregate_themes": None,          # 已由 custom 事件覆盖
+    "navigate_hierarchy": "│ ✅ **[1.2]** 层级导航探查完成",
+    "merge_themes": "│ ✅ **[1.3]** 双路径主题合并完成",
+    "complete_indicators": "│ ✅ **[1.4]** 全量指标补全完成",
     "judge_themes": None,           # 已由 custom 事件覆盖
     "retrieve_templates": "│ ✅ **[2.1]** 模板检索完成",
     "analyze_templates": None,      # 已由 custom 事件覆盖
@@ -131,11 +139,71 @@ def translate_event_to_markdown(data: dict) -> str | None:
         if step == "low_confidence":
             return "\n┌─────────────────────────────────────────\n│ ⚠️ **低置信度** 无法精确匹配，等待用户修改描述\n└─────────────────────────────────────────"
 
+    # ── 阶段 1.1.5 层级导航 ──
+    if stage == "navigate_hierarchy":
+        if step == "fetching_sectors":
+            return "\n┌─────────────────────────────────────────\n│ **[1.2] 层级导航** 正在获取板块列表..."
+        if step == "sectors_loaded":
+            count = data.get("sector_count", 0)
+            return f"│   📂 已加载 {count} 个板块，开始筛选相关板块..."
+        if step == "filtering_sectors":
+            return "│   🤖 LLM 正在判断相关板块..."
+        if step == "sectors_filtered":
+            count = data.get("selected_sector_count", 0)
+            return f"│   ✅ 筛选完成，选中 {count} 个相关板块"
+        if step == "fetching_sector_themes":
+            sector = data.get("sector_alias", "")
+            return f"│   📂 正在加载「{sector}」板块下的所有主题..."
+        if step == "sector_filtered":
+            sector = data.get("sector_alias", "")
+            selected = data.get("selected_count", 0)
+            total = data.get("total_themes", 0)
+            return f"│   ✅ 「{sector}」筛选完成，从 {total} 个主题中选中 **{selected}** 个"
+        if step == "batch_start":
+            batch_idx = data.get("batch_idx", 0)
+            total_batches = data.get("total_batches", 0)
+            sectors = data.get("sectors_in_batch", [])
+            return f"│   🔄 批次 {batch_idx}/{total_batches} 开始处理：{', '.join(sectors)}"
+        if step == "batch_completed":
+            batch_idx = data.get("batch_idx", 0)
+            total_batches = data.get("total_batches", 0)
+            succeeded = data.get("succeeded_sectors", 0)
+            failed = data.get("failed_sectors", 0)
+            selected = data.get("selected_in_batch", 0)
+            fail_info = f"，失败 {failed} 个" if failed > 0 else ""
+            return f"│   ✅ 批次 {batch_idx}/{total_batches} 完成：成功 {succeeded} 个{fail_info}，选中 {selected} 个主题"
+        if step == "completed":
+            count = data.get("selected_count", 0)
+            return f"│   ✅ 层级导航完成，共筛选出 **{count}** 个候选主题\n└─────────────────────────────────────────"
+
+    # ── 阶段 1.1 候选主题聚合 ──
+    if stage == "aggregate_themes":
+        if step == "aggregating":
+            return "\n┌─────────────────────────────────────────\n│ **[1.1] 候选主题聚合** 正在统计匹配指标..."
+        if step == "completed":
+            count = data.get("theme_count", 0)
+            return f"│   ✅ 候选主题聚合完成，共 **{count}** 个候选主题\n└─────────────────────────────────────────"
+
+    # ── 阶段 1.1.5 主题合并 ──
+    if stage == "merge_themes":
+        if step == "merging":
+            agg = data.get("aggregate_count", 0)
+            nav = data.get("navigation_count", 0)
+            return f"\n┌─────────────────────────────────────────\n│ **[1.3] 双路径合并** 聚合路径 {agg} 个 + 层级导航 {nav} 个，正在去重合并..."
+        if step == "completed":
+            count = data.get("merged_count", 0)
+            return f"│   ✅ 合并完成，共 **{count}** 个候选主题\n└─────────────────────────────────────────"
+
     # ── 阶段 1.3 主题裁决 ──
     if stage == "judge_themes":
         if step == "judging":
             count = data.get("theme_count", 0)
             return f"\n┌─────────────────────────────────────────\n│ **[1.3] 主题裁决** 正在评估 **{count}** 个候选主题..."
+        if step == "batch_progress":
+            batch = data.get("batch", 1)
+            total = data.get("total_batches", 1)
+            processed = data.get("processed", 0)
+            return f"│   📦 批次 {batch}/{total} 处理中...（已完成 {processed} 个）"
         if step == "completed":
             return "│ ✅ 主题裁决完成\n└─────────────────────────────────────────"
 
@@ -144,6 +212,11 @@ def translate_event_to_markdown(data: dict) -> str | None:
         if step == "analyzing":
             count = data.get("template_count", 0)
             return f"\n┌─────────────────────────────────────────\n│ **[2.2] 模板可用性分析** 共 **{count}** 个模板"
+        if step == "batch_progress":
+            batch = data.get("batch", 1)
+            total = data.get("total_batches", 1)
+            processed = data.get("processed", 0)
+            return f"│   📦 批次 {batch}/{total} 处理中...（已完成 {processed} 个）"
         if step == "analyzing_template":
             idx = data.get("template_index", "")
             alias = data.get("template_alias", "")
@@ -199,6 +272,39 @@ def _build_response(
         for d in final_output.get("analysis_dimensions", [])
     ]
 
+    # 双路径探查结果：聚合路径候选主题
+    candidate_themes_from_aggregate = [
+        CandidateThemeResponse(
+            theme_id=t.get("theme_id", ""),
+            theme_alias=t.get("theme_alias", ""),
+            theme_level=t.get("theme_level", 0),
+            theme_path=t.get("theme_path", ""),
+            frequency=t.get("frequency", 0),
+            weighted_frequency=t.get("weighted_frequency", 0.0),
+            matched_indicator_ids=t.get("matched_indicator_ids", []),
+        )
+        for t in final_output.get("candidate_themes_from_aggregate", [])
+    ]
+
+    # 双路径探查结果：层级导航详情
+    navigation_path_detail = [
+        SectorNavigationResponse(
+            sector_id=s.get("sector_id", ""),
+            sector_alias=s.get("sector_alias", ""),
+            sector_path=s.get("sector_path", ""),
+            total_themes=s.get("total_themes", 0),
+            selected_themes=[
+                NavigationThemeResponse(
+                    theme_id=t.get("theme_id", ""),
+                    theme_alias=t.get("theme_alias", ""),
+                    theme_path=t.get("theme_path", ""),
+                )
+                for t in s.get("selected_themes", [])
+            ],
+        )
+        for s in final_output.get("navigation_path_detail", [])
+    ]
+
     # 推荐主题
     recommended_themes = []
     for t in final_output.get("recommended_themes", []):
@@ -233,7 +339,7 @@ def _build_response(
             )
         )
 
-    # 推荐模板
+    # 推荐模板（含覆盖率详情）
     recommended_templates = []
     for t in final_output.get("recommended_templates", []):
         usability_data = t.get("usability", {})
@@ -242,25 +348,56 @@ def _build_response(
                 template_id=t["template_id"],
                 template_alias=t["template_alias"],
                 template_description=t.get("template_description", ""),
+                theme_id=t.get("theme_id", ""),
                 theme_alias=t.get("theme_alias", ""),
                 usage_count=t.get("usage_count", 0),
                 coverage_ratio=t.get("coverage_ratio", 0.0),
-                has_qualified_templates=t.get("has_qualified_templates", False),
-                fallback_reason=t.get("fallback_reason", ""),
+                coverage_detail=TemplateCoverageDetail(
+                    covered_indicator_aliases=t.get("covered_indicator_aliases", []),
+                    missing_indicator_aliases=t.get("missing_indicator_aliases", []),
+                    matched_count=t.get("matched_count", 0),
+                    total_user_indicators=t.get("total_user_indicators", 0),
+                ),
+                theme_has_qualified_templates=t.get("theme_has_qualified_templates", False),
+                theme_fallback_reason=t.get("theme_fallback_reason", ""),
                 usability=TemplateUsabilityResponse(
                     template_id=usability_data.get("template_id", t["template_id"]),
-                    overall_usability=usability_data.get("overall_usability", ""),
-                    usability_summary=usability_data.get("usability_summary", ""),
-                    missing_indicator_analysis=[
-                        {
-                            "indicator_alias": m.get("indicator_alias", ""),
-                            "importance": m.get("importance", ""),
-                            "impact": m.get("impact", ""),
-                            "supplement_suggestion": m.get("supplement_suggestion", ""),
-                        }
-                        for m in usability_data.get("missing_indicator_analysis", [])
-                    ],
+                    is_supported=usability_data.get("is_supported", False),
+                    support_reason=usability_data.get("support_reason", ""),
                 ),
+            )
+        )
+
+    # 主题模板检索详情（按主题分组，含 LLM 评估结果）
+    template_search_detail = []
+    for d in final_output.get("template_search_detail", []):
+        template_items = [
+            TemplateSearchDetailTemplateItem(
+                template_id=t.get("template_id", ""),
+                template_alias=t.get("template_alias", ""),
+                template_description=t.get("template_description", ""),
+                usage_count=t.get("usage_count", 0),
+                coverage_ratio=t.get("coverage_ratio", 0.0),
+                covered_indicator_aliases=t.get("covered_indicator_aliases", []),
+                missing_indicator_aliases=t.get("missing_indicator_aliases", []),
+                matched_count=t.get("matched_count", 0),
+                total_user_indicators=t.get("total_user_indicators", 0),
+                is_supported=t.get("is_supported", False),
+                usability_reason=t.get("usability_reason", ""),
+            )
+            for t in d.get("templates", [])
+        ]
+        template_search_detail.append(
+            TemplateSearchDetailResponse(
+                theme_id=d.get("theme_id", ""),
+                theme_alias=d.get("theme_alias", ""),
+                theme_path=d.get("theme_path", ""),
+                is_supported=d.get("is_supported", False),
+                matched_indicator_aliases=d.get("matched_indicator_aliases", []),
+                has_qualified_templates=d.get("has_qualified_templates", False),
+                fallback_reason=d.get("fallback_reason", ""),
+                all_template_count=d.get("all_template_count", 0),
+                templates=template_items,
             )
         )
 
@@ -270,8 +407,11 @@ def _build_response(
         filter_indicators=filter_indicators,
         analysis_dimensions=analysis_dimensions,
         is_low_confidence=final_output.get("is_low_confidence", False),
+        candidate_themes_from_aggregate=candidate_themes_from_aggregate,
+        navigation_path_detail=navigation_path_detail,
         recommended_themes=recommended_themes,
         recommended_templates=recommended_templates,
+        template_search_detail=template_search_detail,
         execution_time_ms=execution_time_ms,
         iteration_rounds=final_output.get("iteration_info", {}).get("rounds", 0),
         conversation_round=final_output.get("conversation_round", 1),
@@ -383,6 +523,8 @@ async def recommend_stream(req: RecommendRequest):
                 "user_confirmation": None,
                 "conversation_history": initial_history,
                 "candidate_themes": [],
+                "navigation_path_themes": [],
+                "navigation_path_detail": [],
                 "recommended_themes": [],
                 "recommended_templates": [],
                 "final_output": {},
@@ -394,6 +536,8 @@ async def recommend_stream(req: RecommendRequest):
                 "extract_phrases",
                 "classify_and_iterate",
                 "aggregate_themes",
+                "navigate_hierarchy",
+                "merge_themes",
                 "complete_indicators",
                 "judge_themes",
                 "retrieve_templates",
@@ -533,6 +677,8 @@ async def resume_stream(req: ResumeRequest):
         "classify_and_iterate",
         "wait_for_confirmation",
         "aggregate_themes",
+        "navigate_hierarchy",
+        "merge_themes",
         "complete_indicators",
         "judge_themes",
         "retrieve_templates",
@@ -730,6 +876,8 @@ def _invoke_agent(
         "user_confirmation": None,
         "conversation_history": initial_history,
         "candidate_themes": [],
+        "navigation_path_themes": [],
+        "navigation_path_detail": [],
         "recommended_themes": [],
         "recommended_templates": [],
         "final_output": {},
