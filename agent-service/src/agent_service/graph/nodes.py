@@ -1045,12 +1045,26 @@ def retrieve_templates(state: AgentState) -> dict:
         logger.info(f"[retrieve_templates]   工具返回: success={result.get('success')}, has_qualified={result.get('has_qualified_templates')}, matched_templates_count={len(result.get('matched_templates', []))}, all_template_count={result.get('all_template_count', 0)}, fallback_reason={result.get('fallback_reason', '')}")
 
         if result.get("success"):
-            # 优先使用达标模板，fallback 到 all_templates（覆盖率详情完整）
-            templates = result.get("matched_templates", []) or result.get("all_templates", [])
+            # 工具返回的所有模板（含达标和降级）
+            all_theme_templates = result.get("all_templates", [])
+            # 达标模板（覆盖率 >= 阈值）
+            qualified_theme_templates = result.get("matched_templates", [])
             has_qualified = result.get("has_qualified_templates", False)
             fallback_reason = result.get("fallback_reason", "")
 
-            logger.info(f"[retrieve_templates]   工具返回 templates ({len(templates)} 个): {[t.get('template_alias','') for t in templates]}")
+            # 始终添加所有模板（无论达标与否），确保 analyze_templates 能对每个模板进行 LLM 评估
+            # 如果有达标模板，优先使用达标模板；否则使用降级推荐的全量模板
+            if all_theme_templates:
+                templates_for_analysis = all_theme_templates
+            elif qualified_theme_templates:
+                templates_for_analysis = qualified_theme_templates
+            else:
+                templates_for_analysis = []
+
+            logger.info(f"[retrieve_templates]   达标模板: {len(qualified_theme_templates)} 个, "
+                        f"全量模板(含降级): {len(all_theme_templates)} 个, "
+                        f"送入LLM评估: {len(templates_for_analysis)} 个, "
+                        f"has_qualified={has_qualified}")
 
             # 记录每个主题的检索详情
             search_entry = {
@@ -1061,18 +1075,36 @@ def retrieve_templates(state: AgentState) -> dict:
                 "matched_indicator_aliases": matched_indicator_aliases,
                 "has_qualified_templates": has_qualified,
                 "fallback_reason": fallback_reason,
-                "all_template_count": result.get("all_template_count", len(templates)),
+                "all_template_count": result.get("all_template_count", len(all_theme_templates)),
             }
             template_search_detail.append(search_entry)
 
-            for t in templates:
-                t["theme_id"] = theme_id
-                t["theme_alias"] = theme["theme_alias"]
-                t["has_qualified_templates"] = has_qualified
-                t["fallback_reason"] = fallback_reason
-
-            all_templates.extend(templates)
-            logger.info(f"[retrieve_templates]   >>> extend后, all_templates累计={len(all_templates)}")
+            # 为每个模板补充主题信息和覆盖率详情（构建独立副本避免污染原对象）
+            for t in templates_for_analysis:
+                template_entry = {
+                    "template_id": t.get("template_id", ""),
+                    "template_alias": t.get("template_alias", ""),
+                    "template_description": t.get("template_description", ""),
+                    "theme_id": theme_id,
+                    "theme_alias": theme_alias,
+                    "usage_count": t.get("usage_count", 0),
+                    "coverage_ratio": t.get("coverage_ratio", 0),
+                    "covered_indicator_aliases": t.get("covered_indicator_aliases", []),
+                    "missing_indicator_aliases": t.get("missing_indicator_aliases", []),
+                    "matched_count": len(t.get("covered_indicator_aliases", [])),
+                    "total_user_indicators": (
+                        len(t.get("covered_indicator_aliases", []))
+                        + len(t.get("missing_indicator_aliases", []))
+                    ),
+                    "has_qualified_templates": has_qualified,
+                    "fallback_reason": fallback_reason,
+                }
+                all_templates.append(template_entry)
+                logger.info(
+                    f"[retrieve_templates]     模板: {t.get('template_alias','')} "
+                    f"覆盖率={t.get('coverage_ratio', 0):.3f} "
+                    f"covered={[x for x in t.get('covered_indicator_aliases', [])[:3]]}"
+                )
         else:
             logger.warning(f"[retrieve_templates]   >>> 工具调用失败: {result.get('error', 'unknown error')}")
 

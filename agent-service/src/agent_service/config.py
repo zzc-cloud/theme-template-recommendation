@@ -68,7 +68,7 @@ EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "4096"))
 # LLM 模型（用于推理，SiliconFlow）"Pro/zai-org/GLM-4.7"
 LLM_MODEL: str = os.getenv(
     "LLM_MODEL",
-    "Pro/deepseek-ai/DeepSeek-R1",
+    "Pro/zai-org/GLM-4.7",
 )
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
