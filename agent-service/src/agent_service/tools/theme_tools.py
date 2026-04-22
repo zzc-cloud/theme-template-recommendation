@@ -678,7 +678,7 @@ def get_sector_themes(sector_id: str, top_k: int = 500) -> dict:
             themes_cypher = """
             MATCH path = (sector:SECTOR {id: $sector_id})-[:HAS_CHILD*]->(theme:THEME)
             MATCH (theme)<-[:HAS_CHILD]-(parent_node)
-            WHERE labels(parent_node)[0] IN ['CATEGORY', 'SUBPATH', 'THEME']
+            WHERE labels(parent_node)[0] IN ['SECTOR', 'CATEGORY', 'SUBPATH', 'THEME']
 
             WITH sector, theme, parent_node, nodes(path) as path_nodes,
                  [n IN nodes(path) WHERE labels(n)[0] <> 'INDICATOR'] as non_ind_nodes
@@ -717,6 +717,8 @@ def get_sector_themes(sector_id: str, top_k: int = 500) -> dict:
             # 获取总数（用于判断是否截断）
             count_cypher = """
             MATCH (sector:SECTOR {id: $sector_id})-[:HAS_CHILD*]->(theme:THEME)
+            MATCH (theme)<-[:HAS_CHILD]-(parent_node)
+            WHERE labels(parent_node)[0] IN ['SECTOR', 'CATEGORY', 'SUBPATH', 'THEME']
             RETURN count(theme) as total
             """
             count_result = session.run(count_cypher, sector_id=sector_id).single()

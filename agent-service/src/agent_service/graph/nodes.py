@@ -543,6 +543,10 @@ def navigate_hierarchy(state: AgentState) -> dict:
         """在子线程中处理单个板块，返回结果字典"""
         sector_id = sector.sector_id
         if not sector_id or sector_id not in selected_sector_ids:
+            logger.warning(
+                f"[层级导航] 板块「{sector_alias}」(id={sector_id}) 被过滤，未在 LLM 候选列表中。"
+                f"候选板块数={len(selected_sector_ids)}，候选列表={selected_sector_ids}"
+            )
             return None
 
         sector_alias = sector.sector_alias
@@ -555,6 +559,10 @@ def navigate_hierarchy(state: AgentState) -> dict:
 
         sector_themes = sector_themes_result.get("themes", [])
         if not sector_themes:
+            logger.warning(
+                f"[层级导航] 板块「{sector_alias}」(id={sector_id}) 主题列表为空，"
+                f"总计 {sector_themes_result.get('total_themes', 0)} 个主题但返回空列表"
+            )
             return None
 
         # 分块处理：如果主题过多，按每块 100 个进行 LLM 筛选
@@ -649,7 +657,10 @@ def navigate_hierarchy(state: AgentState) -> dict:
                         batch_results.append(result)
                 except Exception as e:
                     sector_alias = futures[future].sector_alias
-                    logger.warning(f"[层级导航] 板块「{sector_alias}」处理异常: {e}")
+                    import traceback
+                    logger.warning(
+                        f"[层级导航] 板块「{sector_alias}」处理异常: {e}\n堆栈: {traceback.format_exc()}"
+                    )
 
         # 发送批次完成的 progress 事件
         batch_total_selected = sum(len(r.get("selected_themes", [])) for r in current_batch_results)

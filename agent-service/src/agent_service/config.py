@@ -68,10 +68,10 @@ EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "4096"))
 # LLM 模型（用于推理，SiliconFlow）"Pro/zai-org/GLM-4.7"
 LLM_MODEL: str = os.getenv(
     "LLM_MODEL",
-    "Pro/zai-org/GLM-4.7",
+    "Pro/deepseek-ai/DeepSeek-R1",
 )
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
-LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "16096"))
 
 
 # ─────────────────────────────────────────────
@@ -129,7 +129,7 @@ CONCURRENT_TIMEOUT_SECONDS: float = float(os.getenv("CONCURRENT_TIMEOUT_SECONDS"
 # ─────────────────────────────────────────────
 # LLM 重试配置（集中化管理）
 # ─────────────────────────────────────────────
-LLM_CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "60.0"))
+LLM_CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "300.0"))
 
 # 批量 LLM 任务超时（秒）
 # 推算：单次60s × 最多4次调用 + RATE_LIMIT最大退避35s + 30s余量 ≈ 310s
@@ -137,7 +137,7 @@ LLM_BATCH_TIMEOUT_SECONDS: int = int(os.getenv("LLM_BATCH_TIMEOUT_SECONDS", "310
 
 # 按错误类型的最大重试次数（0 = 不重试）
 LLM_MAX_RETRIES_RATE_LIMIT:   int = int(os.getenv("LLM_MAX_RETRIES_RATE_LIMIT",   "3"))
-LLM_MAX_RETRIES_TIMEOUT:      int = int(os.getenv("LLM_MAX_RETRIES_TIMEOUT",      "2"))
+LLM_MAX_RETRIES_TIMEOUT:      int = int(os.getenv("LLM_MAX_RETRIES_TIMEOUT",      "0"))  # 超时不重试，避免无效请求堆积
 LLM_MAX_RETRIES_SERVER_ERROR: int = int(os.getenv("LLM_MAX_RETRIES_SERVER_ERROR", "2"))
 LLM_MAX_RETRIES_SCHEMA_ERROR: int = int(os.getenv("LLM_MAX_RETRIES_SCHEMA_ERROR", "1"))
 LLM_MAX_RETRIES_AUTH_ERROR:   int = int(os.getenv("LLM_MAX_RETRIES_AUTH_ERROR",   "0"))
