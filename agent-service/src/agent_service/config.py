@@ -120,9 +120,9 @@ JACCARD_SIMILARITY_THRESHOLD: float = float(os.getenv("JACCARD_SIMILARITY_THRESH
 
 
 # ─────────────────────────────────────────────
-# 并发控制配置
+# 并发控制配置 - 每个请求最多等待 5秒 获取信号量
 # ─────────────────────────────────────────────
-MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
+MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 CONCURRENT_TIMEOUT_SECONDS: float = float(os.getenv("CONCURRENT_TIMEOUT_SECONDS", "5.0"))
 
 
@@ -166,8 +166,8 @@ LLM_MAX_DELAY_UNKNOWN:      float = float(os.getenv("LLM_MAX_DELAY_UNKNOWN",    
 # 主题裁决每批主题数量（避免一次性处理过多主题导致超时）
 JUDGE_THEMES_BATCH_SIZE: int = int(os.getenv("JUDGE_THEMES_BATCH_SIZE", "5"))
 # 主题裁决每批超时时间（秒）
-JUDGE_THEMES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("JUDGE_THEMES_BATCH_TIMEOUT_SECONDS", "120.0"))
+JUDGE_THEMES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("JUDGE_THEMES_BATCH_TIMEOUT_SECONDS", "300.0"))
 # 模板分析每批模板数量
 ANALYZE_TEMPLATES_BATCH_SIZE: int = int(os.getenv("ANALYZE_TEMPLATES_BATCH_SIZE", "5"))
 # 模板分析每批超时时间（秒）
-ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS", "120.0"))
+ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS: float = float(os.getenv("ANALYZE_TEMPLATES_BATCH_TIMEOUT_SECONDS", "300.0"))
