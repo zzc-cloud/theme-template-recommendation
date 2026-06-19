@@ -106,7 +106,7 @@ LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
 
 # Chroma 向量库路径（如需挂载本地数据）
-CHROMA_PATH=../mcp-server/data/indicators_vector
+CHROMA_PATH=../indicators_vector
 EOF
 ```
 
@@ -199,7 +199,7 @@ EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
 EMBEDDING_DIM=1024
 
 # Chroma 向量库路径
-# 本地开发：代码自动推断为 mcp-server/data/indicators_vector（可省略此行）
+# 本地开发：代码自动推断为仓库根目录 / indicators_vector（可省略此行）
 # 容器部署：通过 -v 挂载到此路径
 CHROMA_PATH=/app/chroma
 

@@ -27,7 +27,7 @@ mcp = FastMCP("theme-ontology")
 # Neo4j 连接配置
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "yyzzc87275478")
 
 # Neo4j 驱动（单例）
 _driver = None

@@ -6,7 +6,7 @@
 
 ## 项目概述
 
-本项目是从 Smart Query 项目中独立出来的主题模板推荐系统，专注于帮助用户在"魔数师"数据分析平台中快速定位合适的主题和模板。
+本项目专注于帮助用户在"魔数师"数据分析平台中快速定位合适的主题和模板。
 
 **核心功能**：
 - **需求澄清**：将用户问题通过向量化语义搜索直接映射到魔数师指标
@@ -16,170 +16,97 @@
 
 ---
 
-## Skills
+## Web 工具使用优先级
 
-| Skill | 说明 |
-|-------|------|
-| `theme-template-recommendation` | 主 Skill：四阶段执行流程（含需求澄清） |
+本项目中，所有联网浏览、搜索、网页访问和页面抓取任务的工具优先级如下：
 
----
+1. `MCP Chrome`
+2. `WebSearch`，仅在我明确要求时使用
+3. `WebFetch`，禁止使用
 
-## MCP 工具
+如果 MCP Chrome 无法使用，请先停止并询问我，不要自动降级到 `WebSearch` 或 `WebFetch`。
 
-### theme-vector（Chroma + SiliconFlow - 1 个工具）
+使用 `chrome_read_page` 时，不要传空字符串、伪造 `refId` 或猜测 root ref；如果无法读取整页，直接改用 `chrome_javascript` 或 `chrome_get_web_content` 获取 DOM/文本，不要反复试错无效 `refId`。
 
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `search_indicators_by_vector` | **向量化语义搜索魔数师指标** | 0 |
-
-### theme-ontology（Neo4j - 12 个工具）
-
-#### 层级导航工具（阶段 1.2）
-
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `get_sectors_from_root` | 获取"自主分析"下的所有板块（SECTOR） | 1.2 |
-| `get_children_of_node` | 获取任意节点的直接子节点（支持类型过滤） | 1.2 |
-| `get_path_to_theme` | 获取从根节点到主题的完整路径（含同级主题） | 1.2 |
-
-#### 主题聚合与指标补全工具（阶段 1.1/1.3）
-
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `aggregate_themes_from_indicators` | 从指标列表聚合候选主题（按频次排序，含完整路径） | 1.1 |
-| `batch_get_indicator_themes` | 批量获取指标的主题归属（用于 Jaccard 勾选引导） | 0.4 |
-| `get_theme_filter_indicators` | 获取主题下全量筛选指标（时间+机构） | 1.3 |
-| `get_theme_analysis_indicators` | 获取主题下全量分析指标 | 1.3 |
-| `get_theme_full_path` | 获取主题从"自主分析"到该主题的完整路径 | 1 |
-
-#### 语义增强工具（阶段 1）
-
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `get_indicator_field_mapping` | 指标字段映射 | 1 |
-| `get_table_terms` | 表字段术语描述 | 1 |
-| `get_indicator_full_path` | 指标完整路径（含 THEME） | 1 |
-
-#### 模板推荐工具（阶段 2）
-
-| 工具 | 功能 | 阶段 |
-|------|------|------|
-| `get_theme_templates_with_coverage` | 主题模板+覆盖率 | 2 |
-| `get_template_indicators` | 模板包含的指标 | 2 |
-
-### Chrome MCP（浏览器自动化）
-
-当需要访问具体 URL、抓取页面内容或截图时，使用 MCP Chrome 浏览器。**不要尝试 WebFetch**（该工具不可用）。
-
-**配置**：项目已配置 MCP Chrome，位于 [.mcp.json](.mcp.json)。
-
-**可用工具**：
-
-| 工具                        | 功能                           |
-| --------------------------- | ------------------------------ |
-| `mcp__chrome__get_windows_and_tabs` | 获取所有窗口和标签页           |
-| `mcp__chrome__navigate`     | 导航到指定 URL                  |
-| `mcp__chrome__get_visible_text` | 获取页面可见文本               |
-| `mcp__chrome__click_element` | 点击页面元素                   |
-| `mcp__chrome__fill_form_input` | 填写表单输入框                 |
-| `mcp__chrome__submit_form`  | 提交表单                       |
-| `mcp__chrome__take_screenshot` | 截取页面截图                   |
-| `mcp__chrome__execute_javascript` | 执行 JavaScript               |
-
-**典型工作流**：
-
-1. **搜索 + 抓取**：先用 `WebSearch` 获取搜索结果 → 导航到目标 URL → 用 MCP Chrome 抓取页面内容或截图
-2. **直接抓取**：导航到目标 URL → 获取页面文本或截图
-3. **表单填写**：自动填写和提交表单
-
-**注意**：使用 MCP Chrome 前请确保 Chrome 浏览器已打开。
 
 ---
 
-## 执行流程
+## 编程原则
 
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
 ```
-用户问题
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  阶段 0：需求澄清                         │
-│  - 关键词提取                             │
-│  - 向量化语义搜索（直接搜索指标）           │
-│  - 用户确认映射结果                       │
-│  - 问题改写                               │
-│  → 输出：normalized_question              │
-│  → 输出：confirmed_indicators           │
-│  → 输出：filter_indicators              │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  阶段 1：指标信息获取                      │
-│  - 获取指标完整业务路径（含 THEME）        │
-│  - 语义增强：获取字段描述                  │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  阶段 2：主题聚合与决策                    │
-│  - 从匹配指标中聚合 THEME                 │
-│  - 选择 Top 3 作为推荐主题                │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  阶段 3：模板推荐                          │
-│  - 程序化初筛（覆盖率 >= 80%）            │
-│  - LLM 精细化判定（用户主动触发）          │
-└─────────────────────────────────────────┘
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
 ```
 
----
-
-## 与 Smart Query 的区别
-
-| 维度 | Smart Query | 主题模板推荐 |
-|------|-------------|--------------|
-| **目标** | 定位物理表和字段 | 推荐主题和模板 |
-| **输出** | 主表 + 字段映射 | 主题 + 指标 + 模板 |
-| **用户场景** | 需要 SQL 或了解数据存储 | 需要在魔数师平台拖拉拽分析 |
-| **核心路径** | 指标/场景/术语 → 物理表 | 指标 → 主题 → 模板 |
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
 ---
 
-## 数据源依赖
+## 项目测试和执行
 
-本项目依赖两个数据源：
-
-1. **Chroma**：存储魔数师指标的向量化数据（用于语义搜索）
-2. **Neo4j**：存储魔数师指标层（THEME、TEMPLATE、INDICATOR、TERM）
-
-配置文件位于 `mcp-server/.env`。
-
-**前置准备**：首次使用需要运行 `python scripts/indicator_vectorizer.py --rebuild` 对指标进行向量化。
+- 本项目包含多套不同架构的 Python 服务，测试和执行时必须使用各自目录下的虚拟环境，不使用系统 Python 直接运行或测试：
+  - `agent-service` 使用：`/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/agent-service/venv`
+  - `agent-service-DeepAgents` 使用：`/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/agent-service-DeepAgents/venv`
+  - `interaction-console` 使用：`/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/interaction-console/venv`
+- 启动或测试前先根据目标服务选择对应虚拟环境，避免同名包 `agent_service` 解析到另一套实现。
+- 如测试或执行缺失依赖，先提示需要安装的包和安装指令，不要自动改用系统 Python 绕过。
 
 ---
 
-## 目录结构
+## 忽略路径
 
-```
-theme-template-recommendation/
-├── .claude/
-│   └── skills/
-│       └── theme-template-recommendation/
-│           └── SKILL.md
-├── mcp-server/
-│   ├── venv/
-│   ├── theme_ontology_server.py
-│   ├── theme_resources_server.py
-│   ├── theme_vector_server.py        # 向量搜索 MCP 服务器
-│   ├── data/indicators_vector/       # Chroma 向量库存储目录
-│   ├── scripts/
-│   │   └── indicator_vectorizer.py   # 指标向量化脚本
-│   ├── requirements.txt
-│   └── .env
-├── .mcp.json
-├── CLAUDE.md
-└── README.md
-```
+请在本项目中忽略以下路径模式：
+
+- `.BackupOfSkill/`
+
+这些路径不应被读取、搜索、总结或用于任何上下文推理。

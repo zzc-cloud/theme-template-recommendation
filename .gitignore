@@ -5,10 +5,13 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
 
 # Virtual environments
 mcp-server/venv/
 agent-service/venv/
+agent-service-DeepAgents/venv/
+interaction-console/venv/
 .venv/
 
 # IDE
@@ -24,4 +27,11 @@ agent-service/venv/
 mcp-server/.env
 
 # Chroma vector database (large binary files)
-mcp-server/data/indicators_vector/
+indicators_vector/
+
+# Claude local/runtime files
+.claude/worktrees/
+.claude/**/settings.local.json
+
+# other
+.BackupOfSkill/

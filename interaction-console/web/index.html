@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Interaction Console</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <div class="app-shell">
+      <aside class="sidebar glass-panel">
+        <div class="brand-block">
+          <div class="brand-mark">
+            <img src="/assets/OntoBridge.png" alt="OntoBridge" />
+          </div>
+          <div class="brand-copy">
+            <h1>OntoBridge</h1>
+          </div>
+        </div>
+
+        <section class="control-card">
+          <div class="section-title-row">
+            <h2>Agent</h2>
+            <span class="status-badge online"><span class="status-dot"></span>Local</span>
+          </div>
+          <div id="agent-list" class="list"></div>
+        </section>
+
+        <section class="control-card">
+          <div class="section-title-row">
+            <h2>当前会话</h2>
+            <span class="field-label inline-label">Thread ID</span>
+          </div>
+          <input id="thread-id" class="text-input mono" placeholder="thread_id" />
+          <button id="new-session" class="ghost-button full" type="button">新会话</button>
+        </section>
+
+        <section class="control-card local-events-card">
+          <div class="section-title-row">
+            <h2>本地事件</h2>
+            <span class="field-label inline-label">Event Type</span>
+          </div>
+          <div class="local-events-scroll">
+            <div id="event-type-filters" class="event-type-filters"></div>
+          </div>
+          <button id="clear-events" class="danger-button full" type="button">清空当前事件</button>
+        </section>
+      </aside>
+
+      <main class="timeline-panel glass-panel">
+        <header class="topbar">
+          <div class="title-group">
+            <div class="status-line">
+              <span id="connection-status" class="runtime-status"><span class="status-dot idle"></span>未连接</span>
+              <span id="session-pill" class="meta-pill mono">Session</span>
+            </div>
+          </div>
+          <div class="runtime-metrics">
+            <div class="metric-card">
+              <span class="metric-label">事件数</span>
+              <strong id="event-count">0</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Runtime</span>
+              <strong>DeepAgents</strong>
+            </div>
+          </div>
+        </header>
+
+        <div id="timeline" class="timeline"></div>
+
+        <form id="chat-form" class="composer glass-panel">
+          <div class="composer-input-wrap">
+            <input id="user-input" type="text" placeholder="输入问题，例如：我想分析南京分行的小微企业贷款风险" />
+            <button type="submit" class="send-button" aria-label="发送">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M5 12h14M13 6l6 6-6 6" />
+              </svg>
+            </button>
+          </div>
+        </form>
+      </main>
+
+      <aside class="detail-panel glass-panel">
+        <div class="detail-header">
+          <div class="detail-title-wrap">
+            <span class="detail-title-icon"><img src="/assets/eventDetail.png" alt="" /></span>
+            <div>
+              <h2>事件详情</h2>
+            </div>
+          </div>
+          <button id="copy-json" class="ghost-button compact" type="button">复制 JSON</button>
+        </div>
+        <div id="event-meta" class="event-meta empty-meta">选择事件后显示元信息</div>
+        <pre id="event-detail" class="json-viewer">选择左侧时间线事件查看详情</pre>
+      </aside>
+    </div>
+
+    <script src="/assets/vendor/markdown-it/markdown-it.min.js"></script>
+    <script src="/assets/vendor/dompurify/purify.min.js"></script>
+    <script type="module" src="/assets/app.js?v=done-compact-card"></script>
+  </body>
+</html>

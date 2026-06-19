@@ -1,55 +1,34 @@
-#!/usr/bin/env python3
-"""
-Theme Template Recommendation - 向量搜索 MCP 服务器
+"""指标向量搜索工具。
 
-提供基于 Chroma + SiliconFlow 的语义向量搜索能力：
-- search_indicators_by_vector: 向量化语义搜索魔数师指标
-
-对应 Skill 阶段 0：需求澄清中的向量搜索环节。
+本模块封装 Skill 需要的语义检索能力：调用 SiliconFlow embedding API 生成查询
+向量，再到 Chroma 持久化 collection 中检索相似指标。返回结果会作为后续主题
+聚合、维度确认和模板推荐的输入。
 """
 
-from mcp.server.fastmcp import FastMCP
 import json
+import logging
 import time
-import os
 from pathlib import Path
-from dotenv import load_dotenv
 
-# 加载环境变量
-env_path = Path(__file__).parent / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
-
-# 创建 MCP 服务器实例
-mcp = FastMCP("theme-vector")
-
-# ─────────────────────────────────────────────
-# 配置
-# ─────────────────────────────────────────────
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
-SILICONFLOW_EMBEDDING_URL = os.getenv(
-    "SILICONFLOW_EMBEDDING_URL",
-    "https://api.siliconflow.cn/v1/embeddings",
-)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "4096"))
-
-# Chroma 配置
-_DEFAULT_CHROMA_PATH = str("/Users/yyzz/Desktop/MyClaudeCode/theme-template-recommendation/indicators_vector")
-CHROMA_PATH = os.getenv("CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "indicators")
-
-# HTTP Session（带自动重试）
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-_session = None
+from .. import config
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# HTTP Session（带自动重试）
+# Embedding API 是外部依赖，session 在进程内复用，并对限流/5xx 做最小重试。
+# ─────────────────────────────────────────────
+_session: requests.Session | None = None
 
 
-def _get_session():
+def _get_session() -> requests.Session:
     global _session
     if _session is None:
-        _session = __import__("requests").Session()
+        _session = requests.Session()
         retry = Retry(
             total=3,
             backoff_factor=1,
@@ -62,11 +41,19 @@ def _get_session():
 
 # ─────────────────────────────────────────────
 # Chroma 客户端（延迟初始化）
+# 向量库只在首次搜索/统计时打开；不存在 collection 时创建空 collection，
+# 让健康检查能明确返回“向量库为空”而不是初始化失败。
 # ─────────────────────────────────────────────
 _chroma_collection = None
 
 
 def _get_chroma_collection():
+    """
+    获取 Chroma Collection。
+
+    使用 chromadb 0.4.x 的 PersistentClient API。collection 对象缓存在进程内，
+    避免每次工具调用都重新打开持久化目录。
+    """
     global _chroma_collection
     if _chroma_collection is not None:
         return _chroma_collection
@@ -74,14 +61,22 @@ def _get_chroma_collection():
     import chromadb
     import os
 
-    os.makedirs(CHROMA_PATH, exist_ok=True)
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    os.makedirs(config.CHROMA_PATH, exist_ok=True)
 
+    # 某些 chromadb 版本在本地 persistent path 上会走 RustBindings 兼容路径；
+    # 这里显式关闭 tenant/database 校验，避免把本地目录误当远程系统。
+    client = chromadb.PersistentClient(
+        path=config.CHROMA_PATH,
+        tenant="default_tenant",
+        database="default_database",
+    )
+
+    # 先尝试获取，不存在则创建
     try:
-        _chroma_collection = client.get_collection(name=COLLECTION_NAME)
+        _chroma_collection = client.get_collection(name=config.COLLECTION_NAME)
     except Exception:
         _chroma_collection = client.create_collection(
-            name=COLLECTION_NAME,
+            name=config.COLLECTION_NAME,
             metadata={"description": "魔数师指标向量库"},
         )
     return _chroma_collection
@@ -97,12 +92,18 @@ def get_embedding(text: str) -> list[float]:
 
 
 def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[float]]:
-    """批量获取文本向量"""
-    if not SILICONFLOW_API_KEY:
-        raise EnvironmentError("未设置 SILICONFLOW_API_KEY，请检查环境变量配置")
+    """批量获取文本向量。
+
+    批处理减少外部 API 调用次数；单个 batch 内部保留短重试，用于吸收临时限流
+    或服务端错误，最终失败时抛出异常交给工具包装层处理。
+    """
+    if not config.SILICONFLOW_EMBEDDING_API_KEY:
+        raise EnvironmentError(
+            "未设置 SILICONFLOW_EMBEDDING_API_KEY，请检查环境变量配置"
+        )
 
     headers = {
-        "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
+        "Authorization": f"Bearer {config.SILICONFLOW_EMBEDDING_API_KEY}",
         "Content-Type": "application/json",
     }
 
@@ -112,7 +113,7 @@ def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[flo
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
         payload = {
-            "model": EMBEDDING_MODEL,
+            "model": config.EMBEDDING_MODEL,
             "input": batch,
         }
 
@@ -120,7 +121,7 @@ def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[flo
         for attempt in range(3):
             try:
                 resp = session.post(
-                    SILICONFLOW_EMBEDDING_URL,
+                    config.SILICONFLOW_EMBEDDING_URL,
                     headers=headers,
                     json=payload,
                     timeout=60,
@@ -128,12 +129,14 @@ def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[flo
                 resp.raise_for_status()
                 last_exc = None
                 break
-            except Exception as e:
+            except requests.RequestException as e:
                 last_exc = e
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
 
         if last_exc:
-            raise RuntimeError(f"Embedding API 请求失败，已重试 3 次: {last_exc}") from last_exc
+            raise RuntimeError(
+                f"Embedding API 请求失败，已重试 3 次: {last_exc}"
+            ) from last_exc
 
         batch_embeddings = [item["embedding"] for item in resp.json()["data"]]
         all_embeddings.extend(batch_embeddings)
@@ -143,18 +146,18 @@ def get_embedding_batch(texts: list[str], batch_size: int = 32) -> list[list[flo
 
 
 # ─────────────────────────────────────────────
-# MCP 工具
+# 向量搜索 API
 # ─────────────────────────────────────────────
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
+def search_indicators_by_vector(query: str, top_k: int = 20) -> dict:
     """
-    基于向量化语义匹配搜索魔数师指标
+    基于向量化语义匹配搜索魔数师指标。
 
-    用于主题模板推荐 Skill 的阶段 0 需求澄清，通过向量搜索将用户分析概念映射到魔数师指标。
+    返回的 `similarity_score` 由 Chroma 距离转换而来，用于 Skill 判断候选维度的
+    置信度；工具本身不做业务裁决，只返回可解释的候选指标列表。
 
     Args:
-        query: 搜索查询（分析概念词或用户问题片段）
+        query: 搜索查询
         top_k: 返回结果数量，默认 20，最大 100
 
     Returns:
@@ -188,12 +191,12 @@ def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
         actual_top_k = min(top_k, collection.count())
 
         if actual_top_k == 0:
-            return json.dumps({
+            return {
                 "success": False,
                 "error": "向量库为空，请先运行 indicator_vectorizer.py --rebuild",
                 "query": query,
                 "execution_time_ms": round((time.time() - start_time) * 1000, 2),
-            }, ensure_ascii=False)
+            }
 
         results = collection.query(
             query_embeddings=[query_vector],
@@ -221,56 +224,37 @@ def search_indicators_by_vector(query: str, top_k: int = 20) -> str:
                 })
 
         elapsed = (time.time() - start_time) * 1000
-        return json.dumps({
+        return {
             "success": True,
             "query": query,
             "indicator_count": len(indicators),
             "indicators": indicators,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False)
+        }
 
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
-        return json.dumps({
+        logger.exception(f"向量搜索失败: {e}")
+        return {
             "success": False,
             "error": str(e),
             "query": query,
             "execution_time_ms": round(elapsed, 2),
-        }, ensure_ascii=False)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_vector_stats() -> str:
-    """
-    获取向量库统计信息
-
-    Returns:
-        {
-            "success": true,
-            "total_indicators": 1500,
-            "storage_path": "...",
-            "collection_name": "indicators",
-            "embedding_model": "/-8B",
-            "embedding_dim": 4096
         }
-    """
+
+
+def get_vector_stats() -> dict:
+    """获取向量库统计信息，用于健康检查和排障。"""
     try:
         collection = _get_chroma_collection()
-        return json.dumps({
+        return {
             "success": True,
             "total_indicators": collection.count(),
-            "storage_path": CHROMA_PATH,
-            "collection_name": COLLECTION_NAME,
-            "embedding_model": EMBEDDING_MODEL,
-            "embedding_dim": EMBEDDING_DIM,
-        }, ensure_ascii=False)
+            "storage_path": config.CHROMA_PATH,
+            "collection_name": config.COLLECTION_NAME,
+            "embedding_model": config.EMBEDDING_MODEL,
+            "embedding_dim": config.EMBEDDING_DIM,
+        }
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
-
-
-# ─────────────────────────────────────────────
-# 启动服务器
-# ─────────────────────────────────────────────
-
-if __name__ == "__main__":
-    mcp.run()
+        logger.exception(f"获取向量统计失败: {e}")
+        return {"success": False, "error": str(e)}

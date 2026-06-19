@@ -784,7 +784,7 @@ END
 |------|------|---------|
 | **SiliconFlow LLM API** | 所有 LLM 推理调用 | `config.SILICONFLOW_LLM_API_KEY` / `config.SILICONFLOW_BASE_URL` |
 | **SiliconFlow Embedding API** | 查询向量生成 | `config.SILICONFLOW_EMBEDDING_API_KEY` / `config.SILICONFLOW_EMBEDDING_URL` |
-| **Chroma 向量库** | 指标语义搜索 | `config.CHROMA_PATH` / `config.COLLECTION_NAME`（默认 `mcp-server/data/indicators_vector`） |
+| **Chroma 向量库** | 指标语义搜索 | `config.CHROMA_PATH` / `config.COLLECTION_NAME`（默认仓库根目录 / `indicators_vector`） |
 | **Neo4j 图数据库** | 主题本体 + 模板数据 | `config.NEO4J_URI` / `config.NEO4J_USER` / `config.NEO4J_PASSWORD` |
 
 **依赖检查**：

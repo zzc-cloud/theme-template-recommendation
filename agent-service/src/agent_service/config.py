@@ -77,13 +77,13 @@ LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "16096"))
 # ─────────────────────────────────────────────
 # Chroma 向量库配置
 # ─────────────────────────────────────────────
-# 默认使用 mcp-server 中的向量库
+# 默认使用仓库根目录下的向量库
 # 项目结构：theme-template-recommendation/
 #   ├── agent-service/src/agent_service/  ← config.py 在这里
 #   │   └── config.py
-#   └── mcp-server/data/indicators_vector/
+#   └── indicators_vector/
 # 因此需要向上 4 层到达项目根
-_CHROMA_DEFAULT = str(Path(__file__).resolve().parent.parent.parent.parent / "mcp-server" / "data" / "indicators_vector")
+_CHROMA_DEFAULT = str(Path(__file__).resolve().parent.parent.parent.parent / "indicators_vector")
 CHROMA_PATH: str = os.getenv("CHROMA_PATH", _CHROMA_DEFAULT)
 COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "indicators")
 

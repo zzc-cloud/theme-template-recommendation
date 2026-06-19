@@ -30,7 +30,7 @@ services:
       VECTOR_SEARCH_TOP_K: ${VECTOR_SEARCH_TOP_K:-20}
     volumes:
       # 挂载本地 Chroma 向量库（如有）
-      - ${CHROMA_PATH:-../mcp-server/data/indicators_vector}:/app/chroma:ro
+      - ${CHROMA_PATH:-../indicators_vector}:/app/chroma:ro
     depends_on:
       neo4j:
         condition: service_healthy
