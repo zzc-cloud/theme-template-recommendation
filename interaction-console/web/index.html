@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interaction Console</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=llm-tools-balanced-columns" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -87,11 +87,12 @@
         <div class="detail-header">
           <div class="detail-title-wrap">
             <span class="detail-title-icon"><img src="/assets/eventDetail.png" alt="" /></span>
-            <div>
-              <h2>事件详情</h2>
-            </div>
           </div>
-          <button id="copy-json" class="ghost-button compact" type="button">复制 JSON</button>
+          <div class="detail-actions">
+            <button id="show-event-detail" class="ghost-button compact active" type="button">事件详情</button>
+            <button id="show-llm-trace" class="ghost-button compact" type="button">LlmTrace</button>
+            <button id="copy-json" class="ghost-button compact" type="button">复制JSON</button>
+          </div>
         </div>
         <div id="event-meta" class="event-meta empty-meta">选择事件后显示元信息</div>
         <pre id="event-detail" class="json-viewer">选择左侧时间线事件查看详情</pre>
@@ -100,6 +101,6 @@
 
     <script src="/assets/vendor/markdown-it/markdown-it.min.js"></script>
     <script src="/assets/vendor/dompurify/purify.min.js"></script>
-    <script type="module" src="/assets/app.js?v=done-compact-card"></script>
+    <script type="module" src="/assets/app.js?v=llm-trace-schema-description-safe"></script>
   </body>
 </html>

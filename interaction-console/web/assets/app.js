@@ -1,3 +1,5 @@
+import "./llm_trace_formatters.js?v=schema-description-safe";
+
 const EVENT_ICONS = {
   coordinator: "🧠",
   llm_response: "💬",
@@ -69,13 +71,25 @@ const EVENT_TYPE_CONFIG = {
   done: { label: "Done", icon: EVENT_ICONS.stream_end, tone: "emerald", status: "closed" },
 };
 
+function createThreadId() {
+  if (globalThis.crypto?.randomUUID) {
+    return `thread-${globalThis.crypto.randomUUID()}`;
+  }
+  return `thread-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const state = {
   agents: [],
+  // agentId 和事件筛选是 UI 偏好，继续跨窗口保存在 localStorage。
   agentId: localStorage.getItem("interaction.agent_id") || "theme-template-recommendation-deepagents",
-  threadId: localStorage.getItem("interaction.thread_id") || `thread-${Date.now()}`,
-  events: JSON.parse(localStorage.getItem("interaction.events") || "[]"),
+  // threadId/events 是当前窗口会话态：同窗口刷新后保留，另开窗口不共享，避免串用上游 checkpoint。
+  threadId: sessionStorage.getItem("interaction.thread_id") || createThreadId(),
+  events: JSON.parse(sessionStorage.getItem("interaction.events") || "[]"),
   visibleEventTypes: normalizeVisibleEventTypes(JSON.parse(localStorage.getItem("interaction.visible_event_types") || "null") || defaultVisibleEventTypes()),
   selectedSeq: null,
+  detailMode: "event",
+  traces: [],
+  waitingInterrupt: false,
   busy: false,
 };
 
@@ -89,6 +103,8 @@ const els = {
   detail: document.querySelector("#event-detail"),
   eventMeta: document.querySelector("#event-meta"),
   copyJson: document.querySelector("#copy-json"),
+  showEventDetail: document.querySelector("#show-event-detail"),
+  showLlmTrace: document.querySelector("#show-llm-trace"),
   form: document.querySelector("#chat-form"),
   input: document.querySelector("#user-input"),
   status: document.querySelector("#connection-status"),
@@ -112,20 +128,29 @@ function bindEvents() {
     event.preventDefault();
     const text = els.input.value.trim();
     if (!text || state.busy) return;
+    if (state.waitingInterrupt) {
+      addLocalEvent("error", { message: "请先完成当前确认表单" });
+      return;
+    }
     els.input.value = "";
     await sendMessage(text);
   });
 
   els.threadId.addEventListener("change", () => {
-    state.threadId = els.threadId.value.trim() || `thread-${Date.now()}`;
-    localStorage.setItem("interaction.thread_id", state.threadId);
+    state.threadId = els.threadId.value.trim() || createThreadId();
+    sessionStorage.setItem("interaction.thread_id", state.threadId);
     updateRuntimeMeta();
   });
 
   els.newSession.addEventListener("click", () => {
-    state.threadId = `thread-${Date.now()}`;
+    // 新会话只切换当前窗口的 thread_id；旧 thread 的 checkpoint 留在上游进程中，
+    // 但后续请求不再携带旧 ID，因此不会继承旧上下文。
+    state.threadId = createThreadId();
     state.events = [];
     state.selectedSeq = null;
+    state.waitingInterrupt = false;
+    state.traces = [];
+    state.detailMode = "event";
     els.threadId.value = state.threadId;
     persist();
     renderEvents();
@@ -136,6 +161,8 @@ function bindEvents() {
   els.clearEvents.addEventListener("click", () => {
     state.events = [];
     state.selectedSeq = null;
+    state.waitingInterrupt = false;
+    state.detailMode = "event";
     persist();
     renderEvents();
     setDetail(null);
@@ -146,8 +173,19 @@ function bindEvents() {
     await navigator.clipboard.writeText(els.detail.innerText || "");
     els.copyJson.textContent = "已复制";
     setTimeout(() => {
-      els.copyJson.textContent = "复制 JSON";
+      els.copyJson.textContent = "复制JSON";
     }, 1200);
+  });
+
+  els.showEventDetail.addEventListener("click", () => {
+    state.detailMode = "event";
+    renderDetailPanel();
+  });
+
+  els.showLlmTrace.addEventListener("click", async () => {
+    state.detailMode = "trace";
+    await refreshTraces();
+    renderDetailPanel();
   });
 }
 
@@ -276,6 +314,8 @@ function addLocalEvent(type, payload) {
 
 function appendEvent(event) {
   state.events.push(event);
+  if (event.type === "interrupt") state.waitingInterrupt = true;
+  if (event.type === "done") state.waitingInterrupt = false;
   persist();
   renderEvents();
   updateRuntimeMeta();
@@ -288,8 +328,9 @@ function nextSeq() {
 
 function persist() {
   localStorage.setItem("interaction.agent_id", state.agentId);
-  localStorage.setItem("interaction.thread_id", state.threadId);
-  localStorage.setItem("interaction.events", JSON.stringify(state.events));
+  // 当前窗口会话态写入 sessionStorage，避免多个 tab/window 共享同一个上游 thread_id。
+  sessionStorage.setItem("interaction.thread_id", state.threadId);
+  sessionStorage.setItem("interaction.events", JSON.stringify(state.events));
 }
 
 function renderEvents() {
@@ -323,6 +364,12 @@ function renderEvents() {
       shell.className = "event-content-shell";
       shell.appendChild(renderDoneEventSummary(config));
       card.appendChild(shell);
+    } else if (event.type === "middleware") {
+      card.appendChild(renderTimelineNode(config));
+      const shell = document.createElement("div");
+      shell.className = "event-content-shell";
+      shell.appendChild(renderMiddlewareEventSummary(event, config));
+      card.appendChild(shell);
     } else {
       card.innerHTML = `
         <div class="timeline-node"><span>${escapeHtml(config.icon)}</span></div>
@@ -342,7 +389,8 @@ function renderEvents() {
 
     card.addEventListener("click", () => {
       state.selectedSeq = event.seq;
-      setDetail(event);
+      state.detailMode = "event";
+      renderDetailPanel();
       renderEvents();
     });
     els.timeline.appendChild(card);
@@ -364,6 +412,19 @@ function renderToolEventSummary(event, config) {
     <span class="tool-event-summary-main">
       <span class="event-type-badge tone-${config.tone}">${escapeHtml(config.label)}</span>
       <span class="tool-event-name">${escapeHtml(event.payload.tool_name || "unknown")}</span>
+    </span>
+    <time class="event-time mono">${escapeHtml(formatTime(event.timestamp))}</time>
+  `;
+  return summary;
+}
+
+function renderMiddlewareEventSummary(event, config) {
+  const summary = document.createElement("div");
+  summary.className = "tool-event-summary-inline middleware-event-summary-inline";
+  summary.innerHTML = `
+    <span class="tool-event-summary-main">
+      <span class="event-type-badge tone-${config.tone}">${escapeHtml(config.label)}</span>
+      <span class="tool-event-name">${escapeHtml(event.payload.name || "middleware")}</span>
     </span>
     <time class="event-time mono">${escapeHtml(formatTime(event.timestamp))}</time>
   `;
@@ -577,7 +638,8 @@ function toolSubCard({ title, status, event, contentNode, isError = false, onExp
     section.addEventListener("click", (clickEvent) => {
       clickEvent.stopPropagation();
       state.selectedSeq = event.seq;
-      setDetail(event);
+      state.detailMode = "event";
+      renderDetailPanel();
       renderEvents();
     });
   }
@@ -585,7 +647,15 @@ function toolSubCard({ title, status, event, contentNode, isError = false, onExp
   return section;
 }
 
-function openToolEventModal({ title, status, toolName, contentNode, isError = false }) {
+function openToolEventModal({
+  title,
+  status,
+  toolName,
+  contentNode,
+  normalizedContentNode = null,
+  isError = false,
+  subtitle: customSubtitle = null,
+}) {
   const backdrop = document.createElement("div");
   backdrop.className = "tool-event-modal-backdrop";
 
@@ -599,14 +669,18 @@ function openToolEventModal({ title, status, toolName, contentNode, isError = fa
   head.className = "tool-event-modal-head";
 
   const titleWrap = document.createElement("div");
+  titleWrap.className = "tool-event-modal-title-wrap";
   const titleNode = document.createElement("strong");
   titleNode.className = "tool-event-modal-title";
   titleNode.textContent = title;
   const subtitle = document.createElement("div");
   subtitle.className = `tool-event-modal-subtitle ${isError ? "error" : ""}`;
-  subtitle.textContent = `工具：${toolName || "unknown"} · 状态：${status}`;
+  subtitle.textContent = customSubtitle || `工具：${toolName || "unknown"} · 状态：${status}`;
   titleWrap.appendChild(titleNode);
   titleWrap.appendChild(subtitle);
+
+  const actions = document.createElement("div");
+  actions.className = "tool-event-modal-actions";
 
   const closeButton = document.createElement("button");
   closeButton.type = "button";
@@ -620,11 +694,37 @@ function openToolEventModal({ title, status, toolName, contentNode, isError = fa
   closeButton.appendChild(closeIcon);
 
   head.appendChild(titleWrap);
-  head.appendChild(closeButton);
+  head.appendChild(actions);
 
   const body = document.createElement("div");
   body.className = "tool-event-modal-body";
   body.appendChild(contentNode());
+
+  if (normalizedContentNode) {
+    let showingNormalized = false;
+    const normalizeButton = document.createElement("button");
+    normalizeButton.type = "button";
+    normalizeButton.className = "tool-event-modal-normalize";
+    normalizeButton.title = "规格化内容探查";
+    const normalizeIcon = document.createElement("img");
+    normalizeIcon.src = "/assets/txt.svg";
+    normalizeIcon.alt = "";
+    normalizeIcon.setAttribute("aria-hidden", "true");
+    const normalizeText = document.createElement("span");
+    normalizeText.textContent = "规格化内容探查";
+    normalizeButton.appendChild(normalizeIcon);
+    normalizeButton.appendChild(normalizeText);
+    normalizeButton.addEventListener("click", () => {
+      showingNormalized = !showingNormalized;
+      body.replaceChildren(showingNormalized ? normalizedContentNode() : contentNode());
+      normalizeButton.classList.toggle("active", showingNormalized);
+      normalizeText.textContent = showingNormalized ? "查看原始内容" : "规格化内容探查";
+      normalizeButton.title = normalizeText.textContent;
+    });
+    actions.appendChild(normalizeButton);
+  }
+
+  actions.appendChild(closeButton);
 
   modal.appendChild(head);
   modal.appendChild(body);
@@ -836,7 +936,7 @@ function text(value, className = "") {
   return node;
 }
 
-function renderMarkdown(content) {
+function renderMarkdown(content, options = {}) {
   const node = document.createElement("div");
   node.className = "markdown-body";
 
@@ -846,7 +946,7 @@ function renderMarkdown(content) {
   }
 
   const markdown = window.markdownit({
-    html: false,
+    html: options.html === true,
     linkify: true,
     breaks: true,
   });
@@ -857,6 +957,7 @@ function renderMarkdown(content) {
   });
 
   for (const code of node.querySelectorAll('pre > code.language-json, pre > code[class*="language-json"]')) {
+    if (code.closest(".llm-schema-json")) continue;
     code.innerHTML = highlightJson(code.textContent || "");
   }
 
@@ -888,6 +989,274 @@ function isSafeLink(href) {
   } catch {
     return false;
   }
+}
+
+function renderDetailPanel() {
+  els.showEventDetail.classList.toggle("active", state.detailMode === "event");
+  els.showLlmTrace.classList.toggle("active", state.detailMode === "trace");
+  if (state.detailMode === "trace") {
+    setTraceDetail();
+    return;
+  }
+  const event = state.events.find((item) => item.seq === state.selectedSeq) || null;
+  setDetail(event);
+}
+
+async function refreshTraces() {
+  try {
+    const url = `/api/sessions/${encodeURIComponent(state.threadId)}/llm-traces?agent_id=${encodeURIComponent(state.agentId)}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    state.traces = data.events || [];
+  } catch (error) {
+    state.traces = [{ event_type: "error", payload: { message: error.message || String(error) } }];
+  }
+}
+
+function setTraceDetail() {
+  const groups = groupLlmTracesForDisplay(state.traces);
+  const llmTraceCount = state.traces.filter((trace) => ["llm_input", "llm_output", "llm_error"].includes(trace.event_type)).length;
+  els.eventMeta.className = "event-meta";
+  els.eventMeta.innerHTML = `<span class="meta-pill mono">${escapeHtml(state.threadId)}</span><span>${state.traces.length} 条 trace</span><span>${llmTraceCount} 条 LLM trace</span><span>${groups.length} 次 LLM 调用</span>`;
+  if (!state.traces.length) {
+    els.detail.textContent = "当前 thread 暂无 LLM Trace";
+    return;
+  }
+  if (!groups.length) {
+    els.detail.textContent = "非 LLM trace 已隐藏，请仅查看 llm_input / llm_output / llm_error。";
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.className = "trace-list";
+  for (const group of groups) {
+    container.appendChild(renderLlmTraceGroup(group));
+  }
+  els.detail.replaceChildren(container);
+}
+
+function groupLlmTracesForDisplay(traces) {
+  const groups = [];
+  const groupsByFallbackKey = new Map();
+  const groupsByRunId = new Map();
+  let latestOpenGroup = null;
+
+  for (const trace of traces) {
+    if (!["llm_input", "llm_output", "llm_error"].includes(trace.event_type)) continue;
+
+    let group = findLlmTraceGroup(trace, groupsByFallbackKey, groupsByRunId);
+    if (!group && trace.event_type !== "llm_input" && latestOpenGroup && !latestOpenGroup.output && !latestOpenGroup.error) {
+      group = latestOpenGroup;
+    }
+    if (!group) {
+      group = createLlmTraceGroup(trace);
+      groups.push(group);
+    }
+
+    attachLlmTraceToGroup(group, trace);
+    indexLlmTraceGroup(group, groupsByFallbackKey, groupsByRunId);
+    if (trace.event_type === "llm_input") latestOpenGroup = group;
+    if (trace.event_type === "llm_output" || trace.event_type === "llm_error") latestOpenGroup = null;
+  }
+
+  return groups;
+}
+
+function findLlmTraceGroup(trace, groupsByFallbackKey, groupsByRunId) {
+  if (trace.run_id) return groupsByRunId.get(trace.run_id) || null;
+  const fallbackKey = traceFallbackGroupKey(trace);
+  return fallbackKey ? groupsByFallbackKey.get(fallbackKey) || null : null;
+}
+
+function traceFallbackGroupKey(trace) {
+  return trace.parent_run_id || null;
+}
+
+function createLlmTraceGroup(trace) {
+  return {
+    type: "llm_trace_group",
+    seq: trace.seq,
+    created_at: trace.created_at,
+    request_id: trace.request_id,
+    run_id: trace.run_id,
+    fallback_key: traceFallbackGroupKey(trace),
+    model_name: trace.model_name,
+    token_usage: trace.token_usage,
+    input: null,
+    output: null,
+    error: null,
+    traces: [],
+  };
+}
+
+function attachLlmTraceToGroup(group, trace) {
+  group.traces.push(trace);
+  if (trace.event_type === "llm_input") group.input = trace;
+  if (trace.event_type === "llm_output") group.output = trace;
+  if (trace.event_type === "llm_error") group.error = trace;
+
+  group.seq = group.seq ?? trace.seq;
+  group.created_at = group.created_at || trace.created_at;
+  group.request_id = group.request_id || trace.request_id;
+  group.run_id = group.run_id || trace.run_id;
+  group.fallback_key = group.fallback_key || traceFallbackGroupKey(trace);
+  group.model_name = group.model_name || trace.model_name;
+  group.token_usage = group.token_usage || trace.token_usage;
+}
+
+function indexLlmTraceGroup(group, groupsByFallbackKey, groupsByRunId) {
+  if (group.run_id) groupsByRunId.set(group.run_id, group);
+  if (!group.run_id && group.fallback_key) groupsByFallbackKey.set(group.fallback_key, group);
+}
+
+function renderLlmTraceGroup(group) {
+  const detailsNode = document.createElement("details");
+  detailsNode.className = "trace-item llm-trace-card";
+  detailsNode.open = true;
+  detailsNode.appendChild(llmTraceGroupSummary(group));
+
+  const container = document.createElement("div");
+  container.className = "interrupt-form tool-event-group-body llm-trace-group-body";
+
+  const inputStatus = group.input ? "payload" : "missing";
+  container.appendChild(toolSubCard({
+    title: "LLM Input",
+    status: inputStatus,
+    event: null,
+    contentNode: llmTraceInputContentNode(group.input),
+    onExpand: group.input ? () => openToolEventModal({
+      title: "LLM Input",
+      status: inputStatus,
+      subtitle: llmTraceModalSubtitle(group, inputStatus),
+      contentNode: () => llmTraceInputContentNode(group.input),
+      normalizedContentNode: () => llmTraceNormalizedContentNode(group.input),
+    }) : null,
+  }));
+
+  if (group.error) {
+    container.appendChild(toolSubCard({
+      title: "LLM Error",
+      status: "error",
+      event: null,
+      contentNode: llmTraceErrorContentNode(group.error),
+      isError: true,
+      onExpand: () => openToolEventModal({
+        title: "LLM Error",
+        status: "error",
+        subtitle: llmTraceModalSubtitle(group, "error"),
+        isError: true,
+        contentNode: () => llmTraceErrorContentNode(group.error),
+        normalizedContentNode: () => llmTraceNormalizedContentNode(group.error),
+      }),
+    }));
+  } else {
+    const outputStatus = group.output ? "completed" : "waiting";
+    container.appendChild(toolSubCard({
+      title: "LLM Output",
+      status: outputStatus,
+      event: null,
+      contentNode: group.output ? llmTraceOutputContentNode(group.output) : emptyToolText("等待 LLM 输出…"),
+      onExpand: group.output ? () => openToolEventModal({
+        title: "LLM Output",
+        status: outputStatus,
+        subtitle: llmTraceModalSubtitle(group, outputStatus),
+        contentNode: () => llmTraceOutputContentNode(group.output),
+        normalizedContentNode: () => llmTraceNormalizedContentNode(group.output),
+      }) : null,
+    }));
+  }
+
+  detailsNode.appendChild(container);
+  return detailsNode;
+}
+
+function llmTraceGroupSummary(group) {
+  const summary = document.createElement("summary");
+  summary.className = "llm-trace-summary-inline";
+  summary.innerHTML = `
+    <span class="tool-event-summary-main">
+      <span class="event-type-badge tone-blue">LLM</span>
+      ${llmTraceTokenSummary(group)}
+    </span>
+    <time class="event-time mono">${escapeHtml(formatTime(group.created_at))}</time>
+  `;
+  return summary;
+}
+
+function llmTraceInputContentNode(trace) {
+  return llmTracePayloadContentNode(trace, "未收到 llm_input 事件");
+}
+
+function llmTraceOutputContentNode(trace) {
+  return llmTracePayloadContentNode(trace, "未收到 llm_output 事件");
+}
+
+function llmTraceErrorContentNode(trace) {
+  return llmTracePayloadContentNode(trace, "未收到 llm_error 事件");
+}
+
+function llmTracePayloadContentNode(trace, emptyText) {
+  if (!trace) return renderMarkdown(emptyText);
+  const jsonContent = jsonMarkdownValue(trace.payload);
+  if (jsonContent) return renderMarkdown(jsonContent);
+  return renderMarkdown(codeBlock(formatValue(trace.payload)));
+}
+
+function llmTraceNormalizedContentNode(trace) {
+  return renderMarkdown(llmTraceNormalizedMarkdown(trace), { html: true });
+}
+
+function llmTraceNormalizedMarkdown(trace) {
+  if (!trace) return "无可展示内容";
+  const formatters = window.LLMTraceFormatters;
+  if (!formatters) return "# LLM Trace\n\n_Formatters are not available. View raw content instead._";
+  switch (trace.event_type) {
+    case "llm_input":
+      return formatters.formatLLMInput(trace.payload);
+    case "llm_output":
+      return formatters.formatLLMOutput(trace.payload);
+    case "llm_error":
+      return formatters.formatLLMError(trace.payload);
+    default:
+      return [
+        "# LLM Trace",
+        "",
+        "## Overview",
+        "",
+        "_Unknown trace type. View raw content for the complete payload._",
+      ].join("\n");
+  }
+}
+
+function llmTraceModalSubtitle(group, status) {
+  return [
+    `模型：${group.model_name || "unknown"}`,
+    `状态：${status}`,
+  ].filter(Boolean).join(" · ");
+}
+
+function codeBlock(value) {
+  return `\`\`\`\n${String(value || "无可展示内容")}\n\`\`\``;
+}
+
+function llmTraceTokenSummary(group) {
+  const usage = group.token_usage || {};
+  const input = usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens ?? usage.prompt;
+  const output = usage.output_tokens ?? usage.outputTokens ?? usage.completion_tokens ?? usage.completionTokens ?? usage.completion;
+  const parts = [];
+  if (input !== undefined) parts.push(`<span class="llm-trace-token-count">Input ${escapeHtml(input)}</span>`);
+  if (output !== undefined) parts.push(`<span class="llm-trace-token-count"> & Output ${escapeHtml(output)}</span>`);
+  if (!parts.length) return "";
+  return `<span class="llm-trace-token-summary">${parts.join("")}</span>`;
+}
+
+function traceTokenSummary(trace) {
+  if (!trace.token_usage) return "";
+  const usage = trace.token_usage;
+  const total = usage.total_tokens ?? usage.totalTokens ?? usage.total;
+  if (total !== undefined) return ` · tokens ${escapeHtml(total)}`;
+  return ` · tokens ${escapeHtml(JSON.stringify(usage))}`;
 }
 
 function setDetail(event) {
