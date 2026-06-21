@@ -18,7 +18,7 @@ from .event_normalizer import EventNormalizer
 from .schemas import ChatStreamRequest
 from .session_store import session_store
 from .static import index, mount_static
-from .upstream_client import stream_recommend
+from .upstream_client import fetch_llm_traces, stream_recommend
 
 app = FastAPI(title="Interaction Console")
 mount_static(app)
@@ -35,6 +35,24 @@ async def api_agents():
 async def api_session_events(thread_id: str):
     """返回当前进程内缓存的标准化事件，主要用于调试和刷新恢复。"""
     return session_store.list_events(thread_id)
+
+
+@app.get("/api/sessions/{thread_id}/llm-traces")
+async def api_session_llm_traces(
+    thread_id: str,
+    agent_id: str = "theme-template-recommendation-deepagents",
+    limit: int = 200,
+    event_type: str | None = None,
+    request_id: str | None = None,
+):
+    """代理读取上游保存的 LLM trace。"""
+    agent = get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+    try:
+        return await fetch_llm_traces(agent.upstream_url, thread_id, limit=limit, event_type=event_type, request_id=request_id)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
 
 
 @app.post("/api/chat/stream")
@@ -61,15 +79,19 @@ async def api_chat_stream(request: ChatStreamRequest):
             session_store.append(request.thread_id, user_event)
             yield _sse(user_event)
 
+            saw_done = False
             async for line in stream_recommend(agent.upstream_url, request.thread_id, request.user_input):
                 for event in normalizer.normalize_line(line):
                     event_dict = event.model_dump()
+                    if event.type == "done":
+                        saw_done = True
                     session_store.append(request.thread_id, event_dict)
                     yield _sse(event_dict)
             # 上游连接自然结束后补一个 done 事件，方便前端明确标记本轮流已关闭。
-            done = normalizer.normalize({"status": "done"})[0].model_dump()
-            session_store.append(request.thread_id, done)
-            yield _sse(done)
+            if not saw_done:
+                done = normalizer.normalize({"status": "done"})[0].model_dump()
+                session_store.append(request.thread_id, done)
+                yield _sse(done)
         except httpx.HTTPStatusError as exc:
             # 上游返回 4xx/5xx 时，不让浏览器只看到连接断开，而是转成可展示的 error 事件。
             event = normalizer.normalize({

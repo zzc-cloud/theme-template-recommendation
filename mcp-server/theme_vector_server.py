@@ -26,7 +26,7 @@ mcp = FastMCP("theme-vector")
 # ─────────────────────────────────────────────
 # 配置
 # ─────────────────────────────────────────────
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx")
 SILICONFLOW_EMBEDDING_URL = os.getenv(
     "SILICONFLOW_EMBEDDING_URL",
     "https://api.siliconflow.cn/v1/embeddings",

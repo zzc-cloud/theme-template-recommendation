@@ -41,8 +41,8 @@ def _get_session() -> requests.Session:
 
 # ─────────────────────────────────────────────
 # Chroma 客户端（延迟初始化）
-# 向量库只在首次搜索/统计时打开；不存在 collection 时创建空 collection，
-# 让健康检查能明确返回“向量库为空”而不是初始化失败。
+# 向量库只在首次搜索/统计时打开；搜索服务依赖已构建好的 collection，
+# 不在查询路径中创建空 collection，避免掩盖路径或挂载配置错误。
 # ─────────────────────────────────────────────
 _chroma_collection = None
 
@@ -59,26 +59,34 @@ def _get_chroma_collection():
         return _chroma_collection
 
     import chromadb
-    import os
+    from chromadb.config import Settings
 
-    os.makedirs(config.CHROMA_PATH, exist_ok=True)
-
-    # 某些 chromadb 版本在本地 persistent path 上会走 RustBindings 兼容路径；
-    # 这里显式关闭 tenant/database 校验，避免把本地目录误当远程系统。
-    client = chromadb.PersistentClient(
-        path=config.CHROMA_PATH,
-        tenant="default_tenant",
-        database="default_database",
-    )
-
-    # 先尝试获取，不存在则创建
     try:
-        _chroma_collection = client.get_collection(name=config.COLLECTION_NAME)
-    except Exception:
-        _chroma_collection = client.create_collection(
-            name=config.COLLECTION_NAME,
-            metadata={"description": "魔数师指标向量库"},
+        client = chromadb.PersistentClient(
+            path=config.CHROMA_PATH,
+            settings=Settings(anonymized_telemetry=False),
         )
+    except Exception as exc:
+        raise RuntimeError(
+            "Chroma PersistentClient 初始化失败: "
+            f"path={config.CHROMA_PATH}, collection={config.COLLECTION_NAME}, "
+            f"chromadb 版本应为 0.4.x，原始错误: {exc}"
+        ) from exc
+
+    try:
+        collection = client.get_collection(name=config.COLLECTION_NAME)
+    except Exception as exc:
+        raise RuntimeError(
+            "Chroma collection 不存在或不可读取: "
+            f"path={config.CHROMA_PATH}, collection={config.COLLECTION_NAME}. "
+            f"原始错误: {exc}. "
+            "请确认 CHROMA_PATH 指向已有向量库、COLLECTION_NAME 配置正确，"
+            "且 agent-service-DeepAgents/venv 中 chromadb 版本为 0.4.x。"
+            "如果原始错误包含 'no such column: collections.topic'，说明当前向量库"
+            "不是 ChromaDB 0.4.x schema，需要用 0.4.24 重新构建。"
+        ) from exc
+
+    _chroma_collection = collection
     return _chroma_collection
 
 

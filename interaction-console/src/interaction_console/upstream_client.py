@@ -4,6 +4,8 @@
 产出 SSE 文本；具体事件识别由 event_normalizer.py 处理，避免网络层混入协议解析逻辑。
 """
 
+from urllib.parse import urljoin
+
 import httpx
 
 
@@ -20,3 +22,18 @@ async def stream_recommend(url: str, thread_id: str, user_input: str):
                 response.raise_for_status()
             async for line in response.aiter_lines():
                 yield line
+
+
+async def fetch_llm_traces(url: str, thread_id: str, limit: int = 200, event_type: str | None = None, request_id: str | None = None) -> dict:
+    """从上游查询指定 thread_id 的 LLM trace。"""
+    base_url = url.rsplit("/api/v1/recommend", 1)[0]
+    trace_url = urljoin(f"{base_url}/", f"api/v1/traces/{thread_id}")
+    params = {"limit": limit}
+    if event_type:
+        params["event_type"] = event_type
+    if request_id:
+        params["request_id"] = request_id
+    async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        response = await client.get(trace_url, params=params)
+        response.raise_for_status()
+        return response.json()

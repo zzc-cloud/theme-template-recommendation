@@ -16,19 +16,19 @@ from functools import lru_cache
 
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from .. import config
 from .router import select_recommendation_skill
 from .tool_registry import build_tool_registry
+from .traced_chat_openai import TracedChatOpenAI
 
 # 这是对所有服务化 Skill 生效的系统级运行约束。
 # 具体业务步骤、工具调用顺序和展示内容仍写在 skills/theme-template-recommendation/SKILL.md 中。
 SYSTEM_PROMPT = """你是魔数师主题和模板推荐服务。
 必须按已加载 Skill 执行，不要调用未注册工具。
 需要确认分析维度时，必须调用 AskUserQuestion_tools。
-最终必须直接输出面向用户的 Markdown 文本，不要把最终结果包装成 JSON。
+按 Markdown 格式输出内容。
 """
 
 # checkpointer 必须是进程级共享对象：
@@ -38,9 +38,12 @@ checkpointer = MemorySaver()
 
 
 
-def _build_model() -> ChatOpenAI:
+def _build_model() -> TracedChatOpenAI:
     """按配置创建 OpenAI-compatible Chat 模型客户端。"""
-    return ChatOpenAI(
+    # 使用 TracedChatOpenAI 而不是原始 ChatOpenAI，是为了在 provider 边界采集
+    # LangChain 最终发出的 request payload 与 provider 原始 response payload。
+    # 它仍按 OpenAI-compatible ChatOpenAI 方式调用 SiliconFlow，不改变业务行为或模型协议。
+    return TracedChatOpenAI(
         model=config.LLM_MODEL,
         api_key=config.SILICONFLOW_LLM_API_KEY,
         base_url=config.SILICONFLOW_BASE_URL,

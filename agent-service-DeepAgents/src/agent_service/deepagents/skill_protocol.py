@@ -31,16 +31,10 @@ def build_recommend_messages(req: RecommendRequest) -> list[HumanMessage]:
     Expected dict。保持“本函数产出消息列表、路由产出 graph state dict”的分工，
     可以避免这些输入契约错乱导致的下游序列化异常（包括曾出现的 str.model_dump）。
 
-    thread_id 同时也会被 routes.py 放入 LangGraph config，供 checkpointer 关联本次运行。
+    thread_id 由 routes.py 放入 LangGraph config，供 checkpointer 关联本次运行；不要把
+    thread_id 或历史消息拼进用户自然语言上下文。
     """
-    return [
-        HumanMessage(
-            content=(
-                f"thread_id: {req.thread_id}\n"
-                f"用户输入: {req.user_input}"
-            )
-        )
-    ]
+    return [HumanMessage(content=req.user_input)]
 
 
 

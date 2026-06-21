@@ -44,8 +44,10 @@ def test_chat_stream_starts_with_user_message(monkeypatch):
 
 def test_chat_stream_seq_continues_for_same_thread(monkeypatch):
     session_store.events.clear()
+    calls = []
 
     async def fake_stream_recommend(upstream_url, thread_id, user_input):
+        calls.append({"thread_id": thread_id, "user_input": user_input})
         yield 'data: {"model": {"messages": [{"role": "assistant", "content": "收到"}]}}'
 
     monkeypatch.setattr("interaction_console.main.stream_recommend", fake_stream_recommend)
@@ -58,3 +60,42 @@ def test_chat_stream_seq_continues_for_same_thread(monkeypatch):
 
     assert seqs == sorted(seqs)
     assert len(seqs) == len(set(seqs))
+    assert calls == [
+        {"thread_id": "thread-1", "user_input": "第一轮"},
+        {"thread_id": "thread-1", "user_input": "第二轮"},
+    ]
+
+
+def test_chat_stream_forwards_distinct_thread_ids(monkeypatch):
+    session_store.events.clear()
+    calls = []
+
+    async def fake_stream_recommend(upstream_url, thread_id, user_input):
+        calls.append({"thread_id": thread_id, "user_input": user_input})
+        yield 'data: {"status": "done"}'
+
+    monkeypatch.setattr("interaction_console.main.stream_recommend", fake_stream_recommend)
+
+    client = TestClient(app)
+    client.post("/api/chat/stream", json=chat_payload("旧会话", thread_id="thread-A"))
+    client.post("/api/chat/stream", json=chat_payload("新会话", thread_id="thread-B"))
+
+    assert calls == [
+        {"thread_id": "thread-A", "user_input": "旧会话"},
+        {"thread_id": "thread-B", "user_input": "新会话"},
+    ]
+
+
+def test_chat_stream_does_not_duplicate_upstream_done(monkeypatch):
+    session_store.events.clear()
+
+    async def fake_stream_recommend(upstream_url, thread_id, user_input):
+        yield 'data: {"status": "done"}'
+
+    monkeypatch.setattr("interaction_console.main.stream_recommend", fake_stream_recommend)
+
+    client = TestClient(app)
+    response = client.post("/api/chat/stream", json=chat_payload("第一轮"))
+    events = parse_sse(response.text)
+
+    assert [event["type"] for event in events].count("done") == 1

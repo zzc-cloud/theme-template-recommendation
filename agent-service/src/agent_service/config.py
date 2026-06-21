@@ -43,10 +43,10 @@ NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "yyzzc87275478")
 # ─────────────────────────────────────────────
 
 # Embedding API Key（用于向量搜索）
-SILICONFLOW_EMBEDDING_API_KEY: str = os.getenv("SILICONFLOW_EMBEDDING_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+SILICONFLOW_EMBEDDING_API_KEY: str = os.getenv("SILICONFLOW_EMBEDDING_API_KEY", "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx")
 
 # LLM API Key（用于大模型推理）
-SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx")
 
 # API 地址（通常保持不变）
 SILICONFLOW_BASE_URL: str = os.getenv(

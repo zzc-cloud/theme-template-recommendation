@@ -1,6 +1,6 @@
 import requests
 
-key = "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch"
+key = "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx"
 models = [
     "Pro/zai-org/",
     "Pro/zai-org/",

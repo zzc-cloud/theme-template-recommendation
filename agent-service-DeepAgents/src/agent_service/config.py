@@ -30,15 +30,25 @@ else:
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ROOT_DIR / "skills"
 
+# Mysql
+MYSQL_CONFIG = {
+    "host": os.getenv("MYSQL_HOST", "localhost"),
+    "port": int(os.getenv("MYSQL_PORT", "3306")),
+    "user": os.getenv("MYSQL_USER", "root"),
+    "password": os.getenv("MYSQL_PASSWORD", "yyzzc87275478!"),
+    "database": os.getenv("MYSQL_DATABASE", "chatbi_metadata"),
+    "charset": "utf8mb4",
+}
+
 # 图谱连接配置：主题、指标、模板工具都会通过该连接访问 Neo4j。
 NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "yyzzc87275478")
 
 # SiliconFlow 同时承担 LLM 推理和 embedding 生成；两个 key 分开配置，便于部署隔离。
-SILICONFLOW_EMBEDDING_API_KEY: str = os.getenv("SILICONFLOW_EMBEDDING_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+SILICONFLOW_EMBEDDING_API_KEY: str = os.getenv("SILICONFLOW_EMBEDDING_API_KEY", "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx")
 SILICONFLOW_EMBEDDING_URL: str = os.getenv("SILICONFLOW_EMBEDDING_URL", "https://api.siliconflow.cn/v1/embeddings")
-# SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-qrumrpocxqhdbxywqpiibvsvgohruwvoktcywkjmuvoejtch")
+# SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-kofniyrmrzpvvwmnmdoiuncnvwbfqkcorikbufmirkotdovx")
 # SILICONFLOW_BASE_URL: str = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
 SILICONFLOW_LLM_API_KEY: str = os.getenv("SILICONFLOW_LLM_API_KEY", "sk-N0o2SRWj6eza344Ok7g2H0YkZE30U4PIV1aFP8dXnsScJgGJ")
 SILICONFLOW_BASE_URL: str = os.getenv("SILICONFLOW_BASE_URL", "https://vip.aipro.love/v1")

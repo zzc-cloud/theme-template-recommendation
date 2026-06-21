@@ -66,9 +66,8 @@ def test_recommend_messages_use_langchain_human_message():
     assert len(payload) == 1
     message = payload[0]
     assert isinstance(message, HumanMessage)
-    assert message.content.startswith("thread_id: test-001")
-    assert "thread_id: test-001" in message.content
-    assert "用户输入: 我想分析南京分行的小微企业贷款风险" in message.content
+    assert message.content == "我想分析南京分行的小微企业贷款风险"
+    assert "thread_id" not in message.content
 
 
 def test_resume_payload_from_text_uses_original_user_message():
